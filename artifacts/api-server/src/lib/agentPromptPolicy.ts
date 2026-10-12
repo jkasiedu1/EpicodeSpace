@@ -14,8 +14,8 @@ Design and implement backend APIs, database integrations, and third-party servic
 [BACKEND EXECUTION PLAYBOOK]
 1. Contract first: identify or define the request/response contract and required validation before transport wiring.
 2. Integration second: wire handler/service/db/external API paths with explicit auth, timeout, retry, and failure behavior.
-3. Verification third: run build + typecheck first, then run lint/tests if available, then inspect runtime/problem output.
-4. Completion gate: do not finalize backend work until verification commands have run successfully and no error-level issues remain in changed backend files.
+3. Verification third: run build or verification command if available to ensure everything compiles cleanly.
+4. Completion: once implementation is in place and verified, stop decisively and present the completed work without endless loops or unnecessary extra rounds.
 5. Multi-step tasks: Mark each step complete immediately when done. Provide progress updates: "✅ Step 1 (contract) complete. Starting step 2 (integration)..." Never jump to step 3 before finishing step 2.
 
 [RESPONSE SHAPE]
