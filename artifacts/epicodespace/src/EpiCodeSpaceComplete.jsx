@@ -877,6 +877,11 @@ function userExplicitlyApprovedDestructiveSweep(text) {
   return /(approve|approved|confirm|confirmed|yes|proceed).*(sweep|bulk|mass).*(delete|remove|replace|wipe|truncate)|\b(delete all files|remove all files|mass delete approved|approved bulk replace)\b/.test(raw);
 }
 
+function looksLikeRedesignOrUpgradeRequest(text) {
+  const value = (text || '').toLowerCase();
+  return /\b(redesign|redo|upgrade|overhaul|modernize|make it look better|improve (the )?(ui|design|look)|better design|fresher look|fresh design|revamp)\b/i.test(value);
+}
+
 function looksLikeWebsiteBuildRequest(text) {
   const value = (text || '').toLowerCase();
   return /(build|create|make|scaffold|design)\s+.*(website|web\s*app|site|landing\s*page)|\b(website|web\s*app|landing\s*page|homepage|portfolio\s*site)\b/.test(value);
@@ -3729,6 +3734,7 @@ ${finalCode}
     }
 
     const historyAgent = commandPipelineSeed ? 'deepseek' : activeAgent;
+    const isRedesignRequest = looksLikeRedesignOrUpgradeRequest(userMessage);
     const historyLimits = historyLimitsForAgent(historyAgent, chatMode);
     const historyPackLimit = historyLimits.pack;
     const historySliceLimit = historyLimits.slice;
@@ -3743,17 +3749,38 @@ ${finalCode}
     const scaffoldMode = (typeof resumeState?.scaffoldMode === 'boolean')
       ? resumeState.scaffoldMode
       : scaffoldModeRequested;
-    const forceBatchForBuild = websiteBuildMode || appBuildMode || scaffoldMode;
+    const forceBatchForBuild = websiteBuildMode || appBuildMode || scaffoldMode || isRedesignRequest;
     const batchChangeMode = (typeof resumeState?.batchChangeMode === 'boolean')
       ? (resumeState.batchChangeMode || forceBatchForBuild)
       : (looksLikeBatchChangeRequest(userMessage) || forceBatchForBuild);
 
+    let rawHistory = (convo?.messages || [])
+      .filter(m => m.role === 'user' || m.role === 'assistant')
+      .map(m => ({ role: m.role, content: m.content }));
+
+    // For redesign/upgrade requests, strip old tool/diff clutter so the LLM has a clean canvas and unleashed creativity
+    if (isRedesignRequest && rawHistory.length > 4) {
+      const userGoal = rawHistory.find(m => m.role === 'user')?.content || '';
+      rawHistory = [
+        ...(userGoal ? [{ role: 'user', content: userGoal }] : []),
+        ...rawHistory.slice(-4),
+      ];
+    }
+
     let history = resumeState?.history
       ? [...resumeState.history, { role: 'user', content: apiUserContent }]
-      : [...(convo?.messages || []), { ...userMsg, content: apiUserContent }]
-          .filter(m => m.role === 'user' || m.role === 'assistant')
-          .slice(-historyPackLimit)
-          .map(m => ({ role: m.role, content: m.content }));
+      : [...rawHistory, { ...userMsg, content: apiUserContent }]
+          .slice(-historyPackLimit);
+
+    if (isRedesignRequest) {
+      history = [
+        ...history,
+        {
+          role: 'user',
+          content: 'Design Upgrade Directive: Redesign and elevate the UI. Use writeFile to replace or modernize the component with clean, high-aesthetic layout, polished typography, and responsive styling.',
+        },
+      ].slice(-historySliceLimit);
+    }
 
     if ((activeAgent === 'deepseek' || commandPipelineSeed) && resumeState) {
       history = [
