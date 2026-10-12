@@ -1,17 +1,13 @@
 /**
  * modelRouter.ts — Auto routing logic for EpiCodeSpace.
  *
- * Rules for 'Auto' mode (NO premium Anthropic or standard GPT-4o):
- *   - Massive context / long text dumps  → Gemini Flash (large window, cheap)
- *   - Default                            → DeepSeek V3 (fast, smart, tool-calling)
+ * Auto mode uses DeepSeek V3 for every request. Select another model explicitly
+ * when a task needs a different provider or capability.
  *
  * No fallback chain: Auto selects one route and fails fast if that route errors.
  */
 
 export const AUTO_MODEL_ID = '__auto__';
-
-// Thresholds
-const HEAVY_CONTEXT_CHARS = 10_000;  // prompt longer than this → Gemini Flash
 
 export interface AutoRoute {
   agent: string;
@@ -21,10 +17,7 @@ export interface AutoRoute {
 /**
  * Decide which agent+model to use for a given prompt in Auto mode.
  */
-export function resolveAutoRoute(prompt: string): AutoRoute {
-  if (prompt.length > HEAVY_CONTEXT_CHARS) {
-    return { agent: 'gemini', model: 'gemini-2.5-flash' };
-  }
+export function resolveAutoRoute(_prompt: string): AutoRoute {
   return { agent: 'deepseek', model: 'deepseek-chat' };
 }
 

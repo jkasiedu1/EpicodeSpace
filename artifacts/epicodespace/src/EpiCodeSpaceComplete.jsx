@@ -1404,7 +1404,7 @@ function EpiCodeSpaceApp() {
   const [isSteerOpen, setIsSteerOpen] = useState(false);
   const steerInputRef = useRef(null);
   const [chatMode, setChatMode] = useState(() => loadJSON(MODE_KEY, 'agent'));
-  const [activeAgent, setActiveAgent] = useState(() => loadJSON(AGENT_KEY, 'epicode-agent'));
+  const [activeAgent, setActiveAgent] = useState(() => loadJSON(AGENT_KEY, 'deepseek'));
   const tokenCeiling = activeAgent === 'deepseek' ? TOKEN_CEILING_DEEPSEEK : TOKEN_CEILING_DEFAULT;
   // Per-agent model selection (map agentId → modelId). Validated on load so
   // stale entries from a previous catalogue don't break the API call.
@@ -1424,7 +1424,7 @@ function EpiCodeSpaceApp() {
   const [convoSearch, setConvoSearch] = useState('');
   const [renamingConvo, setRenamingConvo] = useState(null);
   const [renameConvoValue, setRenameConvoValue] = useState('');
-  const [conversations, setConversations] = useState(() => loadJSON(CONVOS_KEY, [{ id: 1, name: 'Chat 1', messages: [], agent: 'epicode-agent', createdAt: Date.now() }]));
+  const [conversations, setConversations] = useState(() => loadJSON(CONVOS_KEY, [{ id: 1, name: 'Chat 1', messages: [], agent: 'deepseek', createdAt: Date.now() }]));
   const [activeConvoId, setActiveConvoId] = useState(() => conversations[0]?.id ?? 1);
   const convoCountRef = useRef(Math.max(...conversations.map(c => c.id), 1));
 
@@ -3717,12 +3717,11 @@ ${finalCode}
     // provider-specific multimodal handling.
     const commandPipelineRequested = chatMode === 'agent' && !chatImage && looksLikeCommandExecutionRequest(userMessage);
     const commandPipelineSeed = !chatImage && (commandPipelineRequested || !!resumeState?.commandPipelineMode);
-    // DeepSeek v4 vision models work independently — no R1 preflight analysis needed
-    const isVisionModel = submissionModel === 'deepseek-v4-pro' || submissionModel === 'deepseek-v4-flash';
+    // Use R1 as a planning preflight only when the user explicitly selects it.
     const reasonerPreflightRequested =
       chatMode === 'agent' &&
-      !isVisionModel &&
-      (commandPipelineSeed || activeAgent === 'backend-architect' || activeAgent === 'deepseek');
+      submissionModel === 'deepseek-reasoner' &&
+      (activeAgent === 'backend-architect' || activeAgent === 'deepseek');
     const shouldAttachReasonerContext = reasonerPreflightRequested;
     if (shouldAttachReasonerContext) {
       const maxFiles = activeAgent === 'backend-architect' ? 12 : REASONER_CONTEXT_FILE_LIMIT;
@@ -3801,7 +3800,7 @@ ${finalCode}
         : isBackendArchitectAgent
           ? MAX_ROUNDS_BACKEND
           : MAX_ROUNDS_DEFAULT;
-      const effectiveModel = ((isDeepSeekAgent || commandPipelineMode) && chatMode === 'agent' && submissionModel !== 'deepseek-v4-pro' && submissionModel !== 'deepseek-v4-flash')
+      const effectiveModel = ((isDeepSeekAgent || commandPipelineMode || (isBackendArchitectAgent && needsReasonerPreflight)) && chatMode === 'agent' && submissionModel !== 'deepseek-v4-pro' && submissionModel !== 'deepseek-v4-flash')
         ? DEEPSEEK_EXECUTION_MODEL
         : submissionModel;
       const MAX_SUPPORT_READ_FILES = isDeepSeekAgent ? 6 : isBackendArchitectAgent ? 10 : 3;
@@ -7324,7 +7323,7 @@ ${finalCode}
                                 Auto
                                 {activeModel === AUTO_MODEL_ID && activeAgent === 'epicode-agent' && <CheckCircle2 size={10} className="text-fuchsia-400" />}
                               </div>
-                              <div className="text-[9px] text-purple-500/60 truncate">Routes to DeepSeek or Gemini Flash — no premium models</div>
+                              <div className="text-[9px] text-purple-500/60 truncate">Uses DeepSeek V3 for every request</div>
                             </div>
                           </button>
                         </div>
