@@ -3868,6 +3868,7 @@ ${finalCode}
       let stagnationRounds = Number(resumeState?.stagnationRounds || 0);
       let verificationFailures = 0;
       const executionStartedAt = Date.now();
+      const userRequestedVerification = /\b(run|execute|check|verify|test|build|typecheck|lint)\b.{0,60}\b(build|tests?|typecheck|lint|verification)\b|\b(runBuild|runTests|runLint|runTypecheck)\b/i.test(userMessage);
       const stateTransitions = [{ state: AGENT_RUN_STATES.PLANNING, at: executionStartedAt }];
       const MAX_ROUNDS_DEFAULT = 16;
       const MAX_ROUNDS_DEEPSEEK = 24;
@@ -4794,6 +4795,46 @@ ${finalCode}
                   : c));
                 return;
               }
+            }
+
+            const successfulWriteOnlyBatch = !data.truncated
+              && !userRequestedVerification
+              && cmdsToRun.length === 0
+              && data.tool_calls.length > 0
+              && data.tool_calls.every((tc, i) => isFileWriteTool(tc.name) && !!toolResults?.[i]?.result?.ok);
+            if (successfulWriteOnlyBatch) {
+              const msgId = makeMessageId('assistant');
+              const summary = summarizeFileChanges(allFileChanges);
+              const recap = buildExecutionRecap(allToolCalls, summary);
+              if (summary.files.length > 0) {
+                changeLedgerRef.current.set(msgId, Array.from(allFileChanges.values()));
+              }
+              const assistantMsg = {
+                id: msgId,
+                role: 'assistant',
+                content: `${data.content || 'Implemented the requested changes.'}${recap ? `\n\n---\n\n${recap}` : ''}`,
+                agent: activeAgent,
+                agentName: AGENT_REGISTRY[activeAgent]?.name || 'Agent',
+                toolCalls: compactToolCalls(allToolCalls, 12),
+                steps: allSteps,
+                mode: chatMode,
+                timestamp: Date.now(),
+                changedFiles: summary.files,
+                changedPlus: summary.totalPlus,
+                changedMinus: summary.totalMinus,
+                telemetry: {
+                  durationMs: Date.now() - executionStartedAt,
+                  rounds: round + 1,
+                  transitions: stateTransitions,
+                  toolCalls: allToolCalls.length,
+                },
+                changeStatus: summary.files.length > 0 ? 'pending' : undefined,
+              };
+              setMessages(prev => [...prev.filter(m => !m._progress), assistantMsg]);
+              setConversations(prev => prev.map(c => c.id === activeConvoId
+                ? { ...c, messages: [...c.messages.filter(m => !m._progress), assistantMsg] }
+                : c));
+              return;
             }
 
             // ── Read-loop detection ───────────────────────────────────────────

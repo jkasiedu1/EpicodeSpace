@@ -61,7 +61,7 @@ const AGENT_PERSONAS: Record<string, string> = {
 const WORKSPACE_TOOLS = [
   { name: 'readFile', description: 'Read a file omitted from the supplied project source bundle. Do NOT reread files already included in that bundle; their full contents and line numbers are already in context. For omitted large files, pass startLine/endLine to read only a focused range.', parameters: { type: 'object', properties: { path: { type: 'string' }, startLine: { type: 'number', description: 'Optional 1-indexed start line (for chunk reads)' }, endLine: { type: 'number', description: 'Optional 1-indexed end line (for chunk reads)' }, maxChars: { type: 'number', description: 'Optional hard cap for returned characters (default 60000)' } }, required: ['path'] } },
   { name: 'writeFile', description: 'Create or fully overwrite a file.', parameters: { type: 'object', properties: { path: { type: 'string' }, content: { type: 'string' } }, required: ['path', 'content'] } },
-  { name: 'writeFiles', description: 'Write a cohesive set of related files in one atomic batch. Prefer this for multi-file fixes and complete React features so components, styles, and imports are generated together. Include every complete file as {path, content}; when practical, include one relevant verification tool call in the same response.', parameters: { type: 'object', properties: { files: { type: 'array', items: { type: 'object', properties: { path: { type: 'string' }, content: { type: 'string' } }, required: ['path', 'content'] }, description: 'Complete related file tree to apply atomically' } }, required: ['files'] } },
+  { name: 'writeFiles', description: 'Write a cohesive set of related files in one atomic batch. Prefer this for multi-file fixes and complete React features so components, styles, and imports are generated together. Include every complete file as {path, content}. Do not add verification tool calls unless the user explicitly asks for verification.', parameters: { type: 'object', properties: { files: { type: 'array', items: { type: 'object', properties: { path: { type: 'string' }, content: { type: 'string' } }, required: ['path', 'content'] }, description: 'Complete related file tree to apply atomically' } }, required: ['files'] } },
   { name: 'patchLines', description: '🏆 PREFERRED editing tool. Replace a range of lines in a file by line number. Always succeeds, no text-matching needed. Use the line numbers shown in readFile output. This is the most reliable way to edit files.', parameters: { type: 'object', properties: { path: { type: 'string' }, startLine: { type: 'number', description: '1-indexed first line to replace (inclusive)' }, endLine: { type: 'number', description: '1-indexed last line to replace (inclusive)' }, newContent: { type: 'string', description: 'New content to insert in place of startLine–endLine' } }, required: ['path', 'startLine', 'endLine', 'newContent'] } },
   { name: 'editFile', description: '⚠️ FRAGILE - use patchLines instead. Patches a file by replacing exact text. Requires character-perfect oldText match including all whitespace/tabs/quotes. Fails on minor differences. Include 7+ unchanged context lines before and after to make the match unique.', parameters: { type: 'object', properties: { path: { type: 'string' }, oldText: { type: 'string', description: 'Exact text to find and replace - must match character-for-character including all spaces, tabs, quotes, and line endings. Copy verbatim from readFile output with at least 7 unchanged lines before and after.' }, newText: { type: 'string', description: 'Replacement text' } }, required: ['path', 'oldText', 'newText'] } },
   { name: 'deleteFile', description: 'Delete a file from the workspace.', parameters: { type: 'object', properties: { path: { type: 'string' } }, required: ['path'] } },
@@ -69,10 +69,10 @@ const WORKSPACE_TOOLS = [
   { name: 'searchCode', description: 'Search for a text pattern across all workspace files.', parameters: { type: 'object', properties: { pattern: { type: 'string' } }, required: ['pattern'] } },
   { name: 'analyzeFile', description: 'Run static analysis on a file.', parameters: { type: 'object', properties: { path: { type: 'string' } } } },
   { name: 'runCommand', description: 'Run a shell command in the terminal. ROUTING IS AUTOMATIC — you do not need to choose: npm/npx/node/yarn/pnpm commands go to the WebContainers Runtime (real execution); git/system commands go to the simulated Terminal. Examples: "npm install axios" → runtime; "git status" → terminal.', parameters: { type: 'object', properties: { command: { type: 'string', description: 'Shell command to run. For package installs prefer npmInstall tool. For dev server use "npm run dev".' } }, required: ['command'] } },
-  { name: 'runBuild', description: 'Run the project build command using the detected package manager. Use this for end-of-batch verification when the user wants to confirm the project still builds from chat.', parameters: { type: 'object', properties: { command: { type: 'string', description: 'Optional explicit build command override, e.g. "pnpm run build".' } } } },
-  { name: 'runTests', description: 'Run the project test command using the detected package manager (pnpm/yarn/npm). Use after code changes and before finalizing fixes.', parameters: { type: 'object', properties: { command: { type: 'string', description: 'Optional explicit test command override, e.g. "pnpm test -- --runInBand".' } } } },
-  { name: 'runLint', description: 'Run the project lint command using the detected package manager. Use to validate style and static checks after edits.', parameters: { type: 'object', properties: { command: { type: 'string', description: 'Optional explicit lint command override.' } } } },
-  { name: 'runTypecheck', description: 'Run TypeScript typechecking if available. Prefer this after TS/JS refactors to catch regressions.', parameters: { type: 'object', properties: { command: { type: 'string', description: 'Optional explicit typecheck command override.' } } } },
+  { name: 'runBuild', description: 'Run the project build only when the user explicitly requests a build or verification.', parameters: { type: 'object', properties: { command: { type: 'string', description: 'Optional explicit build command override, e.g. "pnpm run build".' } } } },
+  { name: 'runTests', description: 'Run project tests only when the user explicitly requests tests or verification.', parameters: { type: 'object', properties: { command: { type: 'string', description: 'Optional explicit test command override, e.g. "pnpm test -- --runInBand".' } } } },
+  { name: 'runLint', description: 'Run project lint only when the user explicitly requests linting or verification.', parameters: { type: 'object', properties: { command: { type: 'string', description: 'Optional explicit lint command override.' } } } },
+  { name: 'runTypecheck', description: 'Run TypeScript typechecking only when the user explicitly requests it.', parameters: { type: 'object', properties: { command: { type: 'string', description: 'Optional explicit typecheck command override.' } } } },
   { name: 'diagnoseProject', description: 'Diagnose common project setup issues: missing node_modules, broken CSS/styling setup, missing config files, incorrect Tailwind/PostCSS configuration, missing CSS imports in HTML. Use this whenever the user reports unstyled UI, missing styles, or a project that looks like plain HTML.', parameters: { type: 'object', properties: {} } },
   { name: 'getProjectStructure', description: 'Get the full directory tree of the workspace as a nested structure. Use before making multi-file changes to understand the project layout, folder organization, and file types.', parameters: { type: 'object', properties: {} } },
   { name: 'searchAndReplace', description: 'Find and replace text across workspace files. Use for bulk renaming, updating imports, changing variable names or constants across many files. Changes are applied immediately.', parameters: { type: 'object', properties: { pattern: { type: 'string', description: 'Text or regex pattern to find' }, replacement: { type: 'string', description: 'Replacement text' }, targetFile: { type: 'string', description: 'Optional: limit to one file path' }, regex: { type: 'boolean', description: 'Treat pattern as regex (default false)' }, caseSensitive: { type: 'boolean', description: 'Case-sensitive match (default false)' } }, required: ['pattern', 'replacement'] } },
@@ -133,6 +133,19 @@ function getToolsForMode(mode: string) {
   if (mode === 'plan') return WORKSPACE_TOOLS.filter((t) => READ_ONLY_TOOLS.has(t.name));
   if (mode === 'scaffold') return WORKSPACE_TOOLS; // Full tools for scaffolding
   return WORKSPACE_TOOLS;
+}
+
+function explicitlyRequestsVerification(messages: any[]) {
+  const lastUserMessage = [...(Array.isArray(messages) ? messages : [])]
+    .reverse()
+    .find((message) => message?.role === 'user');
+  const content = lastUserMessage?.content;
+  const text = typeof content === 'string'
+    ? content
+    : Array.isArray(content)
+      ? content.map((part) => typeof part?.text === 'string' ? part.text : '').join('\n')
+      : '';
+  return /\b(run|execute|check|verify|test|build|typecheck|lint)\b.{0,60}\b(build|tests?|typecheck|lint|verification)\b|\b(runBuild|runTests|runLint|runTypecheck)\b/i.test(text);
 }
 
 const PROVIDER_TIMEOUT_MS = Math.max(5000, Number(process.env['AGENT_PROVIDER_TIMEOUT_MS'] ?? '45000'));
@@ -824,7 +837,10 @@ router.post('/chat', async (req, res) => {
 
     const contextStr = buildContextMessage(context);
     const modeInstr = MODE_INSTRUCTIONS[safeMode] || MODE_INSTRUCTIONS.ask;
-    const providerTools = getToolsForMode(safeMode);
+    const verificationRequested = explicitlyRequestsVerification(messages);
+    const providerTools = getToolsForMode(safeMode).filter((tool) =>
+      verificationRequested || !['runBuild', 'runTests', 'runLint', 'runTypecheck'].includes(tool.name)
+    );
     const persona = AGENT_PERSONAS[activeAgent] || AGENT_PERSONAS[resolvedModel] || AGENT_PERSONAS['epicode-agent'];
     const policyPreview = Object.entries(TOOL_POLICY)
       .map(([tool, tier]) => `${tool}:${tier}`)
