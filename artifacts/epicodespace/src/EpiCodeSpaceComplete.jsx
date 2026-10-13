@@ -3761,6 +3761,9 @@ ${finalCode}
           lines: typeof f.content === 'string' ? f.content.split('\n').length : 0,
         })),
     };
+    const bundledContextPaths = new Set(
+      (context.projectFilesBundle?.files || []).map((file) => file.path),
+    );
     // Auto-inject terminal output when the user asks to fix/debug something
     const isFixDebugRequest = /\b(fix|debug|error|bug|broken|crash|not work|fail|exception|undefined|cannot|issue)\b/i.test(userMessage);
     if (isFixDebugRequest && terminalOutputRef.current.length > 0) {
@@ -4430,6 +4433,13 @@ ${finalCode}
               const isOutOfScope = false;
               const result = tc.argumentsError
                 ? { ok: false, error: tc.argumentsError }
+                : tc.name === 'readFile' && bundledContextPaths.has(tc.arguments?.path)
+                ? {
+                    ok: true,
+                    path: tc.arguments.path,
+                    alreadyInContext: true,
+                    systemMessage: `The complete numbered contents of '${tc.arguments.path}' were supplied in the project source bundle. Do not read it again; apply your edit directly using those contents and line numbers.`,
+                  }
                 : isOutOfScope
                 ? {
                     ok: false,
