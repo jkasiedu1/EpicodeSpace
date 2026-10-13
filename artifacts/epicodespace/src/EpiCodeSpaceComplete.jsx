@@ -1072,11 +1072,6 @@ function extractMajorPlanSteps(planText, maxSteps = 8) {
   return numbered.slice(0, maxSteps);
 }
 
-function userApprovedNextPlanStep(text) {
-  const value = String(text || '').toLowerCase().trim();
-  return /^(yes|yep|yeah|continue|go ahead|next|proceed|ok|okay)\b/.test(value);
-}
-
 function userRejectedNextPlanStep(text) {
   const value = String(text || '').toLowerCase().trim();
   return /^(no|stop|pause|hold|not yet|wait)\b/.test(value);
@@ -3866,7 +3861,6 @@ ${finalCode}
       if (Array.isArray(resumeState?.allToolCalls)) allToolCalls = [...resumeState.allToolCalls];
 
       if ((websiteBuildMode || appBuildMode) && planAwaitingApproval) {
-        const approved = userApprovedNextPlanStep(userMessage);
         const rejected = userRejectedNextPlanStep(userMessage);
         if (rejected) {
           const msgId = makeMessageId('assistant');
@@ -3888,30 +3882,6 @@ ${finalCode}
           };
           setMessages(prev => [...prev.filter(m => !m._progress), pauseMsg]);
           setConversations(prev => prev.map(c => c.id === activeConvoId ? { ...c, messages: [...c.messages.filter(m => !m._progress), pauseMsg] } : c));
-          setIsTyping(false);
-          setAgentRunState(AGENT_RUN_STATES.IDLE);
-          return;
-        }
-        if (!approved) {
-          const msgId = makeMessageId('assistant');
-          const askMsg = {
-            id: msgId,
-            role: 'assistant',
-            content: `Step ${Math.max(1, planStepIndex + 1)}/${Math.max(1, planMajorSteps.length)} is queued: ${planMajorSteps[planStepIndex] || 'next major step'}. Reply "continue" to build it, or "pause" to hold.`,
-            agent: activeAgent,
-            agentName: AGENT_REGISTRY[activeAgent]?.name || 'Agent',
-            mode: chatMode,
-            timestamp: Date.now(),
-            canContinue: true,
-            resumeState: {
-              ...resumeState,
-              planAwaitingApproval: true,
-              planStepIndex,
-              planMajorSteps,
-            },
-          };
-          setMessages(prev => [...prev.filter(m => !m._progress), askMsg]);
-          setConversations(prev => prev.map(c => c.id === activeConvoId ? { ...c, messages: [...c.messages.filter(m => !m._progress), askMsg] } : c));
           setIsTyping(false);
           setAgentRunState(AGENT_RUN_STATES.IDLE);
           return;
@@ -4594,34 +4564,6 @@ ${finalCode}
                 allSteps.push(`✅ **saved**(${path})`);
               }
 
-              // Decisive completion: If no terminal commands are requested and the model already provided an explanatory response in content, finalize immediately in 1 round!
-              if (cmdsToRun.length === 0 && typeof data.content === 'string' && data.content.trim().length > 20) {
-                const msgId = makeMessageId('assistant');
-                const summary = summarizeFileChanges(allFileChanges);
-                const recap = buildExecutionRecap(allToolCalls, summary);
-                if (summary.files.length > 0) {
-                  changeLedgerRef.current.set(msgId, Array.from(allFileChanges.values()));
-                }
-                const assistantMsg = {
-                  id: msgId,
-                  role: 'assistant',
-                  content: `${data.content}${recap ? `\n\n---\n\n${recap}` : ''}`,
-                  agent: activeAgent,
-                  agentName: AGENT_REGISTRY[activeAgent]?.name || 'Agent',
-                  toolCalls: compactToolCalls(allToolCalls, 12),
-                  steps: allSteps,
-                  mode: chatMode,
-                  timestamp: Date.now(),
-                  changedFiles: summary.files,
-                  changedPlus: summary.totalPlus,
-                  changedMinus: summary.totalMinus,
-                };
-                setMessages(prev => [...prev.filter(m => !m._progress), assistantMsg]);
-                setConversations(prev => prev.map(c => c.id === activeConvoId
-                  ? { ...c, messages: [...c.messages.filter(m => !m._progress), assistantMsg] }
-                  : c));
-                return;
-              }
             }
             // Run terminal commands requested by agent and wait for completion
             // (for finite runtime commands) before the next tool-call round.
@@ -4753,31 +4695,7 @@ ${finalCode}
                   backendVerificationSatisfied = true;
                 }
                 pendingBatchVerification = false;
-                const msgId = makeMessageId('assistant');
-                const summary = summarizeFileChanges(allFileChanges);
-                const recap = buildExecutionRecap(allToolCalls, summary);
-                if (summary.files.length > 0) {
-                  changeLedgerRef.current.set(msgId, Array.from(allFileChanges.values()));
-                }
-                const assistantMsg = {
-                  id: msgId,
-                  role: 'assistant',
-                  content: `✅ Build and verification completed successfully.${summary.files.length > 0 ? ` Implemented ${summary.files.length} file(s).` : ''}${recap ? `\n\n---\n\n${recap}` : ''}`,
-                  agent: activeAgent,
-                  agentName: AGENT_REGISTRY[activeAgent]?.name || 'Agent',
-                  toolCalls: compactToolCalls(allToolCalls, 12),
-                  steps: allSteps,
-                  mode: chatMode,
-                  timestamp: Date.now(),
-                  changedFiles: summary.files,
-                  changedPlus: summary.totalPlus,
-                  changedMinus: summary.totalMinus,
-                };
-                setMessages(prev => [...prev.filter(m => !m._progress), assistantMsg]);
-                setConversations(prev => prev.map(c => c.id === activeConvoId
-                  ? { ...c, messages: [...c.messages.filter(m => !m._progress), assistantMsg] }
-                  : c));
-                return;
+                allSteps.push('✅ Requested verification command(s) succeeded; returning results to the agent to finish any remaining requested work.');
               }
             }
 

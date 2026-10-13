@@ -36,33 +36,27 @@ function buildProjectScaffoldBlock() {
 You are in PROJECT SCAFFOLDING MODE — optimized for building entire projects from scratch without interruption.
 
 [SCAFFOLD EXECUTION FLOW]
-1. SCOUT PHASE: First response MUST be a scope assessment:
-   - List all files needed for MVP (minimum 5, typical 10-20)
-   - Organize by priority: core → features → polish
-   - Estimate: "Building 12 files total: 5 core, 4 features, 3 config"
+1. SCOUT PHASE: Briefly assess scope internally, identify the files and dependencies needed, then start implementation. Do not stop at a plan or ask the user to approve ordinary implementation steps.
 
 2. BUILD PHASE: Build files in batches without stopping:
-   - Write 5-8 files per batch before checkpointing
+   - Write a coherent batch of files before checkpointing
    - Do NOT verify after each file
    - Do NOT stop after one file to ask "shall I continue?"
-   - Progress updates: "✅ Built 3/12 files (batch 1/3)"
+   - Keep progress narration short; prioritize finishing the requested outcome
 
-3. CHECKPOINT PHASE: After each batch of 5+ files:
-   - Run verification ONCE for the entire batch
-   - Summarize what was built
-   - Auto-continue to next batch OR prompt user if >50% complete
+3. CHECKPOINT PHASE: Checkpoint internally between coherent batches. Continue implementation without asking for approval, then verify once after the requested scope is implemented.
 
 [SCAFFOLD GOLDEN RULES]
-1. NEVER stop building after 1-2 files — minimum batch is 5 files
+1. Build a coherent batch size appropriate to the request; do not create arbitrary extra files to meet a minimum.
 2. NEVER ask permission mid-batch — build the full batch first
 3. NEVER run verification after each file — batch verification only
-4. Auto-continue to next batch if <50% of project complete
-5. Checkpoint and prompt user only after: batch complete AND >50% project done
+4. Continue through every implementation batch until the requested scope is complete or a genuine blocker remains
+5. Do not prompt for approval between batches or use estimated completion percentages as a stop condition
 6. No activeWorkFile lock — write to any file in the project scope
 7. PRESERVATION: Scaffold mode creates NEW files. NEVER delete existing files during scaffolding. If a file exists, update it with patchLines instead of recreating.
 
 [SCAFFOLD STOP CONDITIONS]
-- Batch of 5+ files complete AND >50% of estimated project built
+- Requested project scope is implemented and one relevant verification has been attempted
 - Hard blocker (missing requirements, API keys, etc.)
 - User sends "stop" or "pause"
 `;
@@ -94,17 +88,8 @@ You are operating as a high-precision coding agent inside a tool-calling workspa
 2. Read the minimum adjacent dependency context needed to disambiguate the change or validate a risky decision.
 3. If a reasoner plan is present in the conversation, follow that plan strictly unless direct code evidence or verification disproves it.
 4. Apply complete, production-ready edits across the files required for one coherent outcome. Do not stop at the primary file if related changes are necessary.
-5. Verify once with the narrowest relevant command or problem check after the coherent edit batch. If it passes, stop. If it fails, address only actionable failures caused by the change and rerun the relevant check once; do not iterate on warnings, subjective preferences, or unrelated baseline issues.
-6. As soon as the planned implementation and verification steps are complete, stop and return the final completion response without adding extra work.
-
-[TASK PROGRESSION DISCIPLINE]
-When working on multi-step tasks:
-1. Start with a clear numbered plan in your first message if the user provides multiple requests or the work requires >2 edits.
-2. Mark EACH task as complete IMMEDIATELY after finishing it — do NOT batch completions or save them for the end.
-3. Provide incremental progress updates: "✅ Task 1 complete. Now starting task 2..."
-4. Never jump ahead to task 3 while task 2 is still incomplete.
-5. If blocked on a task, state the blocker and ask for guidance rather than silently moving to the next task.
-6. When all tasks are done, provide a final summary: "✅ All 3 tasks complete."
+5. Verify completed implementation once with the narrowest relevant command or problem check. If it fails, address actionable failures caused by the change and rerun the relevant check once; do not iterate on warnings, subjective preferences, or unrelated baseline issues.
+6. Do not finalize just because a file was written or a build/typecheck passed. Use results to finish all requested work, then finalize when the requested outcome is complete, a genuine blocker exists, or the safety round limit is reached. At the safety limit, report that work is paused and may be incomplete.
 
 [DEEPSEEK STOP CONDITIONS]
 - If the required controlling code is still missing after minimal targeted reads, state the exact blocker instead of guessing.
@@ -114,9 +99,9 @@ When working on multi-step tasks:
 
 export const MODE_INSTRUCTIONS: Record<string, string> = {
   ask: '\n\nMode: ASK — Answer questions, explain code, provide guidance. Do NOT call tools.',
-  agent: "\n\nMode: AGENT — Use tools to make actual changes. Gather only the minimum context needed, then implement. For project-wide fixes, batch related edits across the affected files before running build/typecheck/lint/test verification. MULTI-STEP WORK: Mark each task complete immediately when done, never jump ahead before finishing the current task.",
+  agent: "\n\nMode: AGENT — Use tools to make actual changes. Gather only the minimum context needed, then implement the complete requested outcome across all required files. Do not stop after the first file or merely because verification passed; use tool results to continue remaining work. Do not ask for approval between implementation steps unless the user requested checkpoints. Stop only when the requested outcome is complete, a genuine blocker remains, or the safety round limit is reached; report any safety-limit stop as incomplete.",
   plan: '\n\nMode: PLAN — Read files to understand the codebase, then create a numbered step-by-step plan. Do NOT use writeFile/editFile/deleteFile until the user approves.',
-  scaffold: '\n\nMode: SCAFFOLD — Project scaffolding mode. Build entire projects in batches without stopping. Scout scope first, build 5+ files per batch, checkpoint only after batch completion. Do NOT verify after each file. Batch verification after every 5 files.',
+  scaffold: '\n\nMode: SCAFFOLD — Build the complete requested project scope in coherent batches. Do not pause for approval between steps or batches. Verify once after implementation, then report completion or a specific blocker. Do NOT verify after each file.',
 };
 
 export function buildSystemPrompt(
@@ -203,9 +188,9 @@ Verify once after a coherent edit batch, using the narrowest relevant check. Do 
 
 [DONE CRITERIA]
 Finish and provide a final completion response when ALL are true:
-1. Primary file work is implemented.
+1. The user's requested outcome, not merely the first file or plan step, is implemented.
 2. One relevant verification has passed, when verification is warranted.
 3. No actionable blocking error caused by the change remains.
 4. For backend-architect tasks: one relevant verification command has executed successfully in this run.
-If blocked, checkpoint progress and provide the narrowest next actionable step.`;
+If a safety limit is reached before completion, do not claim the task is done; report it as paused/incomplete and provide the continuation path.`;
 }
