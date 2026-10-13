@@ -1600,6 +1600,12 @@ function EpiCodeSpaceApp() {
     }
   }), []);
 
+  // Route WebContainer server-ready events straight to the Preview pane,
+  // independent of which terminal surface observed the event.
+  useEffect(() => bridge.onServerReady(({ url }) => {
+    if (url) setWcServerUrl(url);
+  }), []);
+
   // When a new server URL arrives: switch to Preview tab but do NOT auto-load
   // the iframe. Loading it immediately causes a memory spike that aborts the
   // shell on Safari (the WebContainer service worker spins up handling the
