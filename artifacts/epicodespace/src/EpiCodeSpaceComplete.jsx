@@ -964,9 +964,6 @@ function looksLikeCommandExecutionRequest(text) {
   return /\b(run|execute|launch|start)\b.*\b(command|terminal|runtime|build|typecheck|lint|tests?|dev|server)\b/.test(value);
 }
 
-const REASONER_CONTEXT_FILE_LIMIT = 8;
-const REASONER_CONTEXT_FILE_CHARS = 2200;
-
 function buildReasonerNeedles(userMessage, activeFile, pinnedFilePath) {
   const needles = new Set(
     String(userMessage || '')
@@ -985,67 +982,72 @@ function buildReasonerNeedles(userMessage, activeFile, pinnedFilePath) {
   return Array.from(needles);
 }
 
-function buildReasonerExcerpt(content, needles, maxChars = REASONER_CONTEXT_FILE_CHARS) {
-  const lines = String(content || '').split('\n');
-  const lowered = lines.map((line) => line.toLowerCase());
-  let focusLine = 0;
+const PROJECT_CONTEXT_CONTENT_BUDGET = 80000;
 
-  for (const needle of needles) {
-    const idx = lowered.findIndex((line) => line.includes(needle));
-    if (idx >= 0) {
-      focusLine = idx;
-      break;
-    }
-  }
-
-  const start = Math.max(0, focusLine - 12);
-  const numbered = [];
-  let usedChars = 0;
-
-  for (let i = start; i < lines.length; i++) {
-    const numberedLine = `${String(i + 1).padStart(4, ' ')} │ ${lines[i]}`;
-    if (numbered.length > 0 && usedChars + numberedLine.length + 1 > maxChars) break;
-    numbered.push(numberedLine);
-    usedChars += numberedLine.length + 1;
-  }
-
-  return numbered.join('\n');
-}
-
-function buildReasonerRelevantFiles(fs, activeFile, userMessage, pinnedFilePath, maxFiles = REASONER_CONTEXT_FILE_LIMIT) {
+function buildProjectContextBundle(fs, activeFile, userMessage, pinnedFilePath, budget = PROJECT_CONTEXT_CONTENT_BUDGET) {
   const needles = buildReasonerNeedles(userMessage, activeFile, pinnedFilePath);
   const candidates = [];
+  const omitted = [];
+  const excludedPath = /(^|\/)(node_modules|\.git|dist|build|coverage|\.next|\.vite|vendor)(\/|$)/i;
+  const excludedFile = /(^|\/)\.env(?!\.(example|sample|template)$)|(^|\/)(\.npmrc|\.pypirc|secrets?[^/]*)$|(^|\/)(package-lock\.json|pnpm-lock\.yaml|yarn\.lock|bun\.lockb)$|\.(lock|map|min\.(js|css)|pem|key|p12|pfx|png|jpe?g|gif|webp|ico|pdf|zip|wasm)$/i;
 
   for (const [path, entry] of Object.entries(fs || {})) {
-    if (!entry || typeof entry !== 'object' || typeof entry.content !== 'string') continue;
-    if (!entry.content.trim()) continue;
+    if (path === pinnedFilePath && path === CANONICAL_GUIDANCE_FILE) continue;
+    if (
+      !entry ||
+      typeof entry !== 'object' ||
+      typeof entry.content !== 'string' ||
+      !entry.content.trim() ||
+      entry.language === 'binary' ||
+      excludedPath.test(path) ||
+      excludedFile.test(path)
+    ) {
+      omitted.push(path);
+      continue;
+    }
 
     const lowerPath = path.toLowerCase();
-    const lowerContent = entry.content.toLowerCase();
+    const lowerContent = entry.content.slice(0, 12000).toLowerCase();
     let score = 0;
 
     if (path === activeFile) score += 100;
     if (path === pinnedFilePath) score += 80;
-    if (/package\.json$|tsconfig|vite\.config|tailwind\.config|openapi\.ya?ml|schema\//i.test(path)) score += 4;
+    if (/package\.json$|tsconfig|vite\.config|tailwind\.config|openapi\.ya?ml|schema\//i.test(path)) score += 10;
+    if (/(^|\/)(src|app|pages|components|server|api|lib)(\/|$)/i.test(path)) score += 5;
+    if (/(^|\/)(__tests__|tests?|e2e)(\/|$)|\.(test|spec)\.[^.]+$/i.test(path)) score += 3;
 
     for (const needle of needles) {
       if (lowerPath.includes(needle)) score += 10;
       if (lowerContent.includes(needle)) score += 3;
     }
 
-    if (score <= 0) continue;
-
-    candidates.push({
-      path,
-      score,
-      excerpt: buildReasonerExcerpt(entry.content, needles),
-    });
+    candidates.push({ path, content: entry.content, score });
   }
 
-  return candidates
-    .sort((a, b) => b.score - a.score || a.path.localeCompare(b.path))
-    .slice(0, maxFiles)
-    .map(({ path, excerpt }) => ({ path, excerpt }));
+  const included = [];
+  let used = 0;
+  let rawContentChars = 0;
+  for (const file of candidates.sort((a, b) => b.score - a.score || a.path.localeCompare(b.path))) {
+    const lineCount = file.content.split('\n').length;
+    const separatorCost = file.path.length + 24;
+    const cost = file.content.length + lineCount * 10 + separatorCost;
+    if (cost > budget - used) {
+      omitted.push(file.path);
+      continue;
+    }
+    included.push({ path: file.path, content: file.content });
+    rawContentChars += file.content.length;
+    used += cost;
+  }
+
+  return {
+    files: included,
+    excludedPaths: omitted.slice(0, 200),
+    omittedPathCount: omitted.length,
+    contentChars: rawContentChars,
+    estimatedContextChars: used,
+    budget,
+  };
 }
 
 function extractReasonerVisibleSummary(planText) {
@@ -3745,6 +3747,9 @@ ${finalCode}
     const context = {
       activeFile,
       activeContent: fileSystem[activeFile]?.content || '',
+      projectFilesBundle: chatMode === 'ask'
+        ? null
+        : buildProjectContextBundle(fileSystem, activeFile, userMessage, pinnedFilePath),
       // Guard against entries with missing/non-string content (directory
       // placeholders, freshly-created empty files, binary blobs). Without
       // this, .split('\n') throws "undefined is not an object".
@@ -3785,12 +3790,6 @@ ${finalCode}
       chatMode === 'agent' &&
       submissionModel === 'deepseek-reasoner' &&
       (activeAgent === 'backend-architect' || activeAgent === 'deepseek');
-    const shouldAttachReasonerContext = reasonerPreflightRequested;
-    if (shouldAttachReasonerContext) {
-      const maxFiles = activeAgent === 'backend-architect' ? 12 : REASONER_CONTEXT_FILE_LIMIT;
-      context.reasonerRelevantFiles = buildReasonerRelevantFiles(fileSystem, activeFile, userMessage, pinnedFilePath, maxFiles);
-    }
-
     const historyAgent = commandPipelineSeed ? 'deepseek' : activeAgent;
     const isRedesignRequest = looksLikeRedesignOrUpgradeRequest(userMessage);
     const historyLimits = historyLimitsForAgent(historyAgent, chatMode);

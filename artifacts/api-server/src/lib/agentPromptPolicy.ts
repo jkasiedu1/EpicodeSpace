@@ -160,6 +160,8 @@ The deleteFile tool is HARDENED to protect all existing work:
 14. When installing dependencies (npmInstall), existing project files MUST remain untouched. Only package.json and node_modules should be affected.
 15. If backend wiring is needed, implement the full slice incrementally: contract, handler, integration, validation.
 15. If the user asks for a cross-project, global, or multi-file fix, switch to batch mode: collect the affected files, apply coordinated patches across them, then verify after the batch instead of after each file.
+16. Use the workspace inventory and bundled project files as shared context. Do not spend tool calls reopening bundled files; read omitted or unlisted files only when needed to make a sound change.
+17. For a cohesive multi-file change, use one writeFiles call with the complete related file tree, then one relevant verification. Treat the source bundle as orientation across the project, not a reason to read or edit every file.
 
 [COMMAND DISCIPLINE]
 1. Use runtime-oriented commands for app work: npm, pnpm, yarn, bun, npx, node, next, vite, tsx, ts-node, nodemon, prisma, drizzle, turbo, and similar project execution commands belong in the runtime path.

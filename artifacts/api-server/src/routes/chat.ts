@@ -195,7 +195,35 @@ function buildContextMessage(context: any) {
     parts.push(`Pinned guidance (${p.path || 'rules'}):\n\`\`\`\n${t}\n\`\`\``);
   }
   if (context.activeFile) parts.push(`Currently editing: ${context.activeFile}`);
-  if (context.activeContent) {
+  const projectBundle = context.projectFilesBundle;
+  const bundledPaths = new Set<string>();
+  if (Array.isArray(projectBundle?.files) && projectBundle.files.length > 0) {
+    const bundled = projectBundle.files
+      .filter((file: any) => typeof file?.path === 'string' && typeof file?.content === 'string')
+      .map((file: any) => {
+        bundledPaths.add(file.path);
+        const numbered = file.content
+          .split('\n')
+          .map((line: string, index: number) => `${String(index + 1).padStart(4, ' ')} │ ${line}`)
+          .join('\n');
+        return `### ${file.path}\n${numbered}\n### End ${file.path}`;
+      })
+      .join('\n\n');
+    const omitted = Array.isArray(projectBundle.excludedPaths)
+      ? projectBundle.excludedPaths.filter((path: any) => typeof path === 'string')
+      : [];
+    const omittedCount = Math.max(omitted.length, Number(projectBundle.omittedPathCount) || 0);
+    parts.push(
+      `Project source bundle (${bundledPaths.size} complete file(s), ${Number(projectBundle.contentChars) || 0} content characters):\n` +
+      `The workspace path inventory appears below. The files listed here are already in context; do not read them again. ` +
+      `Use readFile only for an omitted file needed for the task.\n` +
+      `${bundled}\n` +
+      (omitted.length
+        ? `\nNot included in source bundle (context budget or generated/sensitive file; showing ${omitted.length} of ${omittedCount}): ${omitted.join(', ')}`
+        : '')
+    );
+  }
+  if (context.activeContent && !bundledPaths.has(String(context.activeFile || ''))) {
     const raw = context.activeContent;
     const LIMIT = 40000;
     const truncated = raw.length > LIMIT;
@@ -204,7 +232,19 @@ function buildContextMessage(context: any) {
     const suffix = truncated ? '\n...(active file truncated for context budget — do NOT reread it wholesale; work from this context or make a targeted edit)' : '';
     parts.push(`File contents (line numbers shown — use patchLines to edit by line range):\n\`\`\`\n${numbered}${suffix}\n\`\`\`\n⚠ This file is already in your context. Do NOT call readFile for it — use patchLines, editFile, or writeFile to make changes immediately.`);
   }
-  if (context.files?.length) parts.push(`Workspace files: ${context.files.map((f: any) => `${f.path} (${f.language}, ${f.lines} lines)`).join(', ')}`);
+  if (context.files?.length) {
+    const INVENTORY_LIMIT = 30000;
+    const inventory: string[] = [];
+    let inventoryChars = 0;
+    for (const file of context.files) {
+      const line = `${file.path} (${file.language}, ${file.lines} lines)`;
+      if (inventoryChars + line.length + 1 > INVENTORY_LIMIT) break;
+      inventory.push(line);
+      inventoryChars += line.length + 1;
+    }
+    const omittedFiles = context.files.length - inventory.length;
+    parts.push(`Workspace file inventory${omittedFiles > 0 ? ` (${inventory.length} shown; ${omittedFiles} more omitted from the inventory budget)` : ''}:\n${inventory.join('\n')}`);
+  }
   if (Array.isArray(context.reasonerRelevantFiles) && context.reasonerRelevantFiles.length > 0) {
     const relevant = context.reasonerRelevantFiles
       .map((f: any) => `Relevant file: ${f.path}\n\n\`\`\`\n${f.excerpt || ''}\n\`\`\``)
