@@ -61,6 +61,7 @@ const AGENT_PERSONAS: Record<string, string> = {
 const WORKSPACE_TOOLS = [
   { name: 'readFile', description: 'Read file contents. For large files, pass startLine/endLine to read a focused chunk and avoid context overflow.', parameters: { type: 'object', properties: { path: { type: 'string' }, startLine: { type: 'number', description: 'Optional 1-indexed start line (for chunk reads)' }, endLine: { type: 'number', description: 'Optional 1-indexed end line (for chunk reads)' }, maxChars: { type: 'number', description: 'Optional hard cap for returned characters (default 60000)' } }, required: ['path'] } },
   { name: 'writeFile', description: 'Create or fully overwrite a file.', parameters: { type: 'object', properties: { path: { type: 'string' }, content: { type: 'string' } }, required: ['path', 'content'] } },
+  { name: 'writeFiles', description: 'Write a cohesive set of related files in one atomic batch. Prefer this for a complete React feature or small app so components, styles, and imports are generated together. Include every complete file as {path, content}; do not split one cohesive batch across separate model rounds.', parameters: { type: 'object', properties: { files: { type: 'array', items: { type: 'object', properties: { path: { type: 'string' }, content: { type: 'string' } }, required: ['path', 'content'] }, description: 'Complete related file tree to apply atomically' } }, required: ['files'] } },
   { name: 'patchLines', description: '🏆 PREFERRED editing tool. Replace a range of lines in a file by line number. Always succeeds, no text-matching needed. Use the line numbers shown in readFile output. This is the most reliable way to edit files.', parameters: { type: 'object', properties: { path: { type: 'string' }, startLine: { type: 'number', description: '1-indexed first line to replace (inclusive)' }, endLine: { type: 'number', description: '1-indexed last line to replace (inclusive)' }, newContent: { type: 'string', description: 'New content to insert in place of startLine–endLine' } }, required: ['path', 'startLine', 'endLine', 'newContent'] } },
   { name: 'editFile', description: '⚠️ FRAGILE - use patchLines instead. Patches a file by replacing exact text. Requires character-perfect oldText match including all whitespace/tabs/quotes. Fails on minor differences. Include 7+ unchanged context lines before and after to make the match unique.', parameters: { type: 'object', properties: { path: { type: 'string' }, oldText: { type: 'string', description: 'Exact text to find and replace - must match character-for-character including all spaces, tabs, quotes, and line endings. Copy verbatim from readFile output with at least 7 unchanged lines before and after.' }, newText: { type: 'string', description: 'Replacement text' } }, required: ['path', 'oldText', 'newText'] } },
   { name: 'deleteFile', description: 'Delete a file from the workspace.', parameters: { type: 'object', properties: { path: { type: 'string' } }, required: ['path'] } },
@@ -96,6 +97,7 @@ const TOOL_POLICY: Record<string, 'read' | 'safe_write' | 'risky_write' | 'comma
   diagnoseProject: 'read',
   explainError: 'read',
   writeFile: 'safe_write',
+  writeFiles: 'safe_write',
   editFile: 'safe_write',
   patchLines: 'safe_write',
   searchAndReplace: 'safe_write',
@@ -118,7 +120,7 @@ const READ_ONLY_TOOLS = new Set([
 
 // Tools that mutate the workspace
 const WRITE_TOOLS = new Set([
-  'writeFile', 'editFile', 'patchLines', 'deleteFile',
+  'writeFile', 'writeFiles', 'editFile', 'patchLines', 'deleteFile',
   'searchAndReplace', 'autoFix', 'createComponent', 'npmInstall', 'runCommand', 'runBuild', 'runTests', 'runLint', 'runTypecheck',
 ]);
 
@@ -406,6 +408,37 @@ function findLastIndex(arr: any[], pred: (x: any) => boolean) {
   return -1;
 }
 
+const MAX_DEEPSEEK_CONTINUATIONS = 3;
+
+function appendContinuation(existing: string, continuation: string) {
+  if (!continuation) return existing;
+  if (continuation.startsWith(existing)) {
+    return continuation.length > existing.length ? continuation : existing;
+  }
+  if (existing.startsWith(continuation)) return existing;
+
+  const maxOverlap = Math.min(4000, existing.length, continuation.length);
+  for (let overlap = maxOverlap; overlap >= 32; overlap--) {
+    if (existing.endsWith(continuation.slice(0, overlap))) {
+      return existing + continuation.slice(overlap);
+    }
+  }
+  return existing + continuation;
+}
+
+function mergeUsage(total: any, next: any) {
+  if (!next) return total;
+  if (!total) return { ...next };
+
+  const merged = { ...total, ...next };
+  for (const [key, value] of Object.entries(next)) {
+    if (typeof value === 'number' && typeof total[key] === 'number') {
+      merged[key] = total[key] + value;
+    }
+  }
+  return merged;
+}
+
 async function callOpenAI(config: any, apiKey: string, systemPrompt: string, messages: any[], useTools: boolean, tools: any[]) {
   const isReasoning = /^o\d/i.test(config.model);
   const body: any = { model: config.model, messages: [{ role: 'system', content: systemPrompt }, ...messages] };
@@ -437,9 +470,83 @@ async function callOpenAI(config: any, apiKey: string, systemPrompt: string, mes
   const data: any = await res.json();
   const choice = data.choices?.[0];
   if (choice?.message?.tool_calls?.length) {
-    return { type: 'tool_calls', tool_calls: choice.message.tool_calls.map((tc: any) => { let args = {}; try { args = JSON.parse(tc.function.arguments); } catch {} return { id: tc.id, name: tc.function.name, arguments: args }; }), content: choice.message.content || null, usage: data.usage };
+    const toolCalls = choice.message.tool_calls.map((tc: any) => {
+      try {
+        return { id: tc.id, name: tc.function.name, arguments: JSON.parse(tc.function.arguments) };
+      } catch {
+        return {
+          id: tc.id,
+          name: tc.function.name,
+          arguments: {},
+          argumentsError: `The model's ${tc.function.name} arguments were incomplete or invalid JSON${choice.finish_reason === 'length' ? ' because the response reached its output-token limit' : ''}. No changes from this call were applied; regenerate the complete file batch from the tool results.`,
+        };
+      }
+    });
+    return {
+      type: 'tool_calls',
+      tool_calls: toolCalls,
+      content: choice.message.content || null,
+      usage: data.usage,
+      truncated: choice.finish_reason === 'length',
+    };
   }
-  return { type: 'text', content: choice?.message?.content || 'No response.', usage: data.usage };
+
+  const isDeepSeekChat = config.model === 'deepseek-chat' && config.url.includes('api.deepseek.com');
+  let content = typeof choice?.message?.content === 'string' ? choice.message.content : '';
+  let finishReason = choice?.finish_reason;
+  let usage = data.usage;
+  let continuationCount = 0;
+
+  while (isDeepSeekChat && finishReason === 'length' && continuationCount < MAX_DEEPSEEK_CONTINUATIONS && content) {
+    const continuationMessages = [
+      ...messages,
+      { role: 'assistant', content },
+      {
+        role: 'user',
+        content: 'Continue exactly where your previous response ended. Do not repeat any content already provided. Do not summarize or restart; provide only the remaining continuation.',
+      },
+    ];
+    const continuationBody: any = {
+      ...body,
+      messages: [{ role: 'system', content: systemPrompt }, ...continuationMessages],
+    };
+    delete continuationBody.tools;
+    delete continuationBody.tool_choice;
+
+    const continuationRes = await fetchProvider(config.url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
+      body: JSON.stringify(continuationBody),
+    }, config.model);
+    if (!continuationRes.ok) {
+      const err = await continuationRes.text();
+      const e: any = new Error(`${config.model} continuation error ${continuationRes.status}: ${err}`);
+      e.status = continuationRes.status;
+      e.body = err;
+      throw e;
+    }
+
+    const continuationData: any = await continuationRes.json();
+    const continuationChoice = continuationData.choices?.[0];
+    const nextContent = typeof continuationChoice?.message?.content === 'string'
+      ? continuationChoice.message.content
+      : '';
+    const combinedContent = appendContinuation(content, nextContent);
+    usage = mergeUsage(usage, continuationData.usage);
+    continuationCount += 1;
+    finishReason = continuationChoice?.finish_reason;
+
+    if (combinedContent === content) break;
+    content = combinedContent;
+  }
+
+  return {
+    type: 'text',
+    content: content || 'No response.',
+    usage,
+    continuationCount,
+    truncated: isDeepSeekChat && finishReason === 'length',
+  };
 }
 
 async function callAnthropic(config: any, apiKey: string, systemPrompt: string, messages: any[], useTools: boolean, tools: any[]) {
@@ -518,23 +625,21 @@ function appendToolResults(apiMessages: any[], toolResults: any[], pendingToolCa
   const roundHasWrite = pendingToolCalls.some(tc => WRITE_TOOLS.has(tc.name));
   const roundAllRead  = pendingToolCalls.length > 0 && !roundHasWrite;
   const writeConstraint = roundAllRead
-    ? '⚠ You spent the last round only reading. Use current context to make concrete progress now: prefer patchLines/editFile/writeFile, or runBuild/runTests/runLint/runTypecheck when verification is the blocker.'
+    ? '⚠ You spent the last round only reading. Use current context to make concrete progress now: prefer writeFiles for a cohesive multi-file change, otherwise patchLines/editFile/writeFile, or runBuild/runTests/runLint/runTypecheck when verification is the blocker.'
     : null;
 
-  // Detect multi-step work without proper completion markers
-  // Look back at recent assistant messages for task/step patterns
-  const recentAssistantMessages = apiMessages.filter(m => m.role === 'assistant' || m._geminiRole === 'model').slice(-3);
-  const hasTaskNumbers = recentAssistantMessages.some(m => {
-    const text = String(m.content || m._geminiParts?.[0]?.text || '');
-    return /(?:task|step)\s*[123456]/i.test(text) && !/✅|complete|done|finished/i.test(text);
+  const incompleteWrite = toolResults.some((r) => /arguments were incomplete or invalid JSON/i.test(String(r?.result?.error || '')));
+  const appliedPaths = toolResults.flatMap((r) => {
+    const result = r?.result;
+    if (!result?.ok) return [];
+    if (result.action === 'writeFiles') return (result.files || []).map((file: any) => file.path);
+    return result.action === 'write' && typeof result.path === 'string' ? [result.path] : [];
   });
-  
-  const taskProgressReminder = hasTaskNumbers && roundHasWrite
-    ? '📋 Multi-step work detected: Mark EACH task complete immediately when done (e.g., "✅ Task 1 complete. Starting task 2..."). Do NOT jump to task 3 before finishing task 2.'
+  const recoveryInstruction = incompleteWrite
+    ? `⚠ A file-writing tool call was truncated or malformed and was not applied. Continue the user's requested change with one complete writeFiles call if the remaining related files fit. Do not repeat successful writes for: ${appliedPaths.join(', ') || '(none)'}.`
     : null;
 
-  // Combine both messages; prefer dedupeMessage first, append write constraint if present
-  const systemMsg = [dedupeMessage, writeConstraint, taskProgressReminder].filter(Boolean).join('\n\n') || null;
+  const systemMsg = [dedupeMessage, writeConstraint, recoveryInstruction].filter(Boolean).join('\n\n') || null;
 
   if (transform === 'openai') {
     apiMessages.push({ role: 'assistant', content: null, tool_calls: pendingToolCalls.map(tc => ({ id: tc.id, type: 'function', function: { name: tc.name, arguments: JSON.stringify(tc.arguments) } })) });

@@ -39,10 +39,12 @@ You are in PROJECT SCAFFOLDING MODE — optimized for building entire projects f
 1. SCOUT PHASE: Briefly assess scope internally, identify the files and dependencies needed, then start implementation. Do not stop at a plan or ask the user to approve ordinary implementation steps.
 
 2. BUILD PHASE: Build files in batches without stopping:
+   - When scope and context are clear, prefer one writeFiles call containing the complete related file tree for a cohesive batch, instead of a separate model round per file
    - Write a coherent batch of files before checkpointing
    - Do NOT verify after each file
    - Do NOT stop after one file to ask "shall I continue?"
    - Keep progress narration short; prioritize finishing the requested outcome
+   - When a relevant project check exists, include one verification tool call after the file batch in the same response
 
 3. CHECKPOINT PHASE: Checkpoint internally between coherent batches. Continue implementation without asking for approval, then verify once after the requested scope is implemented.
 
@@ -75,12 +77,14 @@ You are operating as a high-precision coding agent inside a tool-calling workspa
 3. Match local patterns: preserve existing naming, control flow, error handling, framework usage, and formatting.
 4. No placeholder edits: never write TODO stubs, elided replacements, pseudocode, or partial patches that leave the file in a half-finished state.
 5. Active-file first: the active file is already in context. Do not call readFile on it again.
+6. For a cohesive feature or scaffold, once the necessary context is available, prefer one writeFiles call with the complete related file tree. Avoid spending a separate model round per file; choose the complete tree that fits the request without inventing extra files.
+7. When the project has a relevant check, include one verification tool call after the writeFiles call in the same response. Never verify after each file.
 
 [DEEPSEEK TOOL DISCIPLINE]
 1. Gather the minimum context needed, then write.
 2. Supporting reads are allowed when they directly reduce uncertainty about the controlling code path, affected types, or required verification.
 3. Avoid read-only drift: once the controlling code path is clear, switch to an edit or a verification command.
-4. For targeted edits, prefer patchLines or editFile. For comprehensive redesigns and upgrades, use writeFile directly to replace the target file cleanly.
+4. For targeted edits, prefer patchLines or editFile. For a comprehensive single-file redesign, use writeFile; for a cohesive multi-file implementation, use one writeFiles call.
 5. When editFile fails because oldText does not match, switch to patchLines or writeFile immediately — DO NOT re-read the file or retry editFile.
 
 [DEEPSEEK EXECUTION LOOP]
@@ -88,8 +92,8 @@ You are operating as a high-precision coding agent inside a tool-calling workspa
 2. Read the minimum adjacent dependency context needed to disambiguate the change or validate a risky decision.
 3. If a reasoner plan is present in the conversation, follow that plan strictly unless direct code evidence or verification disproves it.
 4. Apply complete, production-ready edits across the files required for one coherent outcome. Do not stop at the primary file if related changes are necessary.
-5. Verify completed implementation once with the narrowest relevant command or problem check. If it fails, address actionable failures caused by the change and rerun the relevant check once; do not iterate on warnings, subjective preferences, or unrelated baseline issues.
-6. Do not finalize just because a file was written or a build/typecheck passed. Use results to finish all requested work, then finalize when the requested outcome is complete, a genuine blocker exists, or the safety round limit is reached. At the safety limit, report that work is paused and may be incomplete.
+5. When relevant, include one verification tool call after the implementation batch in the same response. If it fails, address only actionable failures caused by the change and rerun that check once; do not iterate on warnings, subjective preferences, or unrelated baseline issues.
+6. Once the requested outcome is complete and relevant verification has passed (when warranted), finalize. Do not add tool calls or changes after the job is done.
 
 [DEEPSEEK STOP CONDITIONS]
 - If the required controlling code is still missing after minimal targeted reads, state the exact blocker instead of guessing.
@@ -99,9 +103,9 @@ You are operating as a high-precision coding agent inside a tool-calling workspa
 
 export const MODE_INSTRUCTIONS: Record<string, string> = {
   ask: '\n\nMode: ASK — Answer questions, explain code, provide guidance. Do NOT call tools.',
-  agent: "\n\nMode: AGENT — Use tools to make actual changes. Gather only the minimum context needed, then implement the complete requested outcome across all required files. Do not stop after the first file or merely because verification passed; use tool results to continue remaining work. Do not ask for approval between implementation steps unless the user requested checkpoints. Stop only when the requested outcome is complete, a genuine blocker remains, or the safety round limit is reached; report any safety-limit stop as incomplete.",
+  agent: "\n\nMode: AGENT — Use tools to make actual changes. Gather only the minimum context needed, then implement the complete requested outcome across required files. Use your judgment to avoid redundant reads, tools, and verification. Do not stop with a partial implementation; once the request is complete and one relevant verification has passed (when warranted), finalize without further calls.",
   plan: '\n\nMode: PLAN — Read files to understand the codebase, then create a numbered step-by-step plan. Do NOT use writeFile/editFile/deleteFile until the user approves.',
-  scaffold: '\n\nMode: SCAFFOLD — Build the complete requested project scope in coherent batches. Do not pause for approval between steps or batches. Verify once after implementation, then report completion or a specific blocker. Do NOT verify after each file.',
+  scaffold: '\n\nMode: SCAFFOLD — Build the requested project scope in coherent batches without approval pauses. Use your judgment on batch size; do not create extra work to meet arbitrary counts. Verify once after implementation, then finalize.',
 };
 
 export function buildSystemPrompt(
@@ -192,5 +196,5 @@ Finish and provide a final completion response when ALL are true:
 2. One relevant verification has passed, when verification is warranted.
 3. No actionable blocking error caused by the change remains.
 4. For backend-architect tasks: one relevant verification command has executed successfully in this run.
-If a safety limit is reached before completion, do not claim the task is done; report it as paused/incomplete and provide the continuation path.`;
+Once these criteria are met, stop tool use and provide a concise completion response.`;
 }

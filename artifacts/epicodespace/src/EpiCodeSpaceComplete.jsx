@@ -456,7 +456,10 @@ function ThinkingBlock({ steps = [], toolCalls = [], inProgress = false, mode })
     return { emoji, text, isThought, isWarning };
   });
 
-  const writeCount   = toolCalls.filter(tc => tc.tool === 'writeFile' || tc.tool === 'editFile' || tc.tool === 'patchLines').length;
+  const writeCount   = toolCalls.reduce((count, tc) => count + (
+    tc.tool === 'writeFiles' ? (Array.isArray(tc.args?.files) ? tc.args.files.length : 0)
+      : tc.tool === 'writeFile' || tc.tool === 'editFile' || tc.tool === 'patchLines' ? 1 : 0
+  ), 0);
   const readCount    = toolCalls.filter(tc => tc.tool === 'readFile').length;
   const searchCount  = toolCalls.filter(tc => tc.tool === 'searchCode').length;
   const cmdCount     = toolCalls.filter(tc => tc.tool === 'runCommand' || tc.tool === 'runTests' || tc.tool === 'runLint' || tc.tool === 'runTypecheck').length;
@@ -512,15 +515,16 @@ function ThinkingBlock({ steps = [], toolCalls = [], inProgress = false, mode })
           {displayToolCalls.length > 0 && (
             <div className="pt-1.5 mt-1.5 border-t border-white/5 flex flex-wrap gap-1">
               {displayToolCalls.map((tc, ti) => {
-                const isWrite = tc.tool === 'writeFile' || tc.tool === 'editFile';
+                const isWrite = tc.tool === 'writeFile' || tc.tool === 'writeFiles' || tc.tool === 'editFile';
                 const isDel   = tc.tool === 'deleteFile';
                 const isSrch  = tc.tool === 'searchCode';
                 const isCmd   = tc.tool === 'runCommand';
                 const label   = tc.args?.path
                   ? tc.args.path.split('/').pop()
+                  : tc.tool === 'writeFiles' && Array.isArray(tc.args?.files) ? `${tc.args.files.length} files`
                   : tc.args?.command ? tc.args.command.slice(0, 28)
                   : tc.args?.pattern ? `"${tc.args.pattern}"` : '';
-                const icon = tc.tool === 'writeFile' ? '📝'
+                const icon = tc.tool === 'writeFile' || tc.tool === 'writeFiles' ? '📝'
                   : tc.tool === 'editFile' ? '✏️'
                   : tc.tool === 'deleteFile' ? '🗑️'
                   : tc.tool === 'readFile' ? '📖'
@@ -530,7 +534,7 @@ function ThinkingBlock({ steps = [], toolCalls = [], inProgress = false, mode })
                 return (
                   <span
                     key={ti}
-                    title={`${tc.tool}(${tc.args?.path || tc.args?.command || ''})`}
+                    title={`${tc.tool}(${tc.args?.path || (tc.tool === 'writeFiles' ? `${tc.args?.files?.length || 0} files` : '') || tc.args?.command || ''})`}
                     className={`inline-flex items-center gap-1 text-[10px] px-2 py-0.5 rounded-md font-mono border ${
                       isWrite ? 'bg-emerald-500/10 text-emerald-400/80 border-emerald-500/20'
                       : isDel  ? 'bg-red-500/10 text-red-400/70 border-red-500/20'
@@ -650,6 +654,7 @@ function toolCallSignature(name, args) {
 function toolCallPath(call) {
   const args = call?.args || call?.arguments || {};
   if (typeof args.path === 'string' && args.path) return args.path;
+  if (Array.isArray(args.files) && typeof args.files[0]?.path === 'string') return args.files[0].path;
   if (typeof args.targetFile === 'string' && args.targetFile) return args.targetFile;
   return null;
 }
@@ -676,7 +681,7 @@ function buildExecutionRecap(toolCalls = [], changeSummary = { files: [], totalP
   if (calls.length === 0 && files.length === 0) return '';
 
   const countTools = (...names) => calls.filter((c) => names.includes(c.tool || c.name)).length;
-  const writeCount = countTools('writeFile', 'editFile', 'patchLines', 'searchAndReplace', 'autoFix', 'createComponent', 'deleteFile');
+  const writeCount = countTools('writeFile', 'writeFiles', 'editFile', 'patchLines', 'searchAndReplace', 'autoFix', 'createComponent', 'deleteFile');
   const readCount = countTools('readFile', 'listFiles', 'searchCode', 'analyzeFile', 'getProjectStructure');
   const commandCount = countTools('runCommand', 'npmInstall', 'runTests', 'runLint', 'runTypecheck', 'getGitStatus');
 
@@ -741,6 +746,7 @@ const TOOL_POLICY = {
   diagnoseProject: 'read',
   explainError: 'read',
   writeFile: 'safe_write',
+  writeFiles: 'safe_write',
   editFile: 'safe_write',
   patchLines: 'safe_write',
   searchAndReplace: 'safe_write',
@@ -2848,6 +2854,49 @@ ${finalCode}
 
         return { ok: true, action: 'write', path: args.path, language: lang, content: safeContent, lines: safeContent.split('\n').length };
       }
+      case 'writeFiles': {
+        if (!Array.isArray(args.files) || args.files.length === 0) {
+          return { ok: false, error: 'writeFiles requires a non-empty files array with complete {path, content} entries.' };
+        }
+
+        const seenPaths = new Set();
+        const files = [];
+        for (const file of args.files) {
+          if (!file || typeof file.path !== 'string' || !file.path.trim() || typeof file.content !== 'string') {
+            return { ok: false, error: 'writeFiles was rejected: every file needs a non-empty path and complete string content. No files were written.' };
+          }
+          if (seenPaths.has(file.path)) {
+            return { ok: false, error: `writeFiles was rejected: duplicate path '${file.path}'. No files were written.` };
+          }
+          seenPaths.add(file.path);
+
+          const existing = currentFS[file.path];
+          const existingContent = existing?.content ?? '';
+          const oldLines = existingContent.split('\n').length;
+          const newLines = file.content.split('\n').length;
+          if (existing && !file.content.trim()) {
+            return { ok: false, error: `writeFiles was rejected: empty overwrite would erase '${file.path}'. No files were written.` };
+          }
+          if (existing && oldLines >= 80 && newLines < Math.floor(oldLines * 0.6)) {
+            return { ok: false, error: `writeFiles was rejected: content for '${file.path}' appears truncated (${newLines}/${oldLines} lines). No files were written; use patchLines/editFile for targeted changes.` };
+          }
+
+          const language = existing?.language || (
+            file.path.endsWith('.jsx') || file.path.endsWith('.js') ? 'javascript'
+            : file.path.endsWith('.tsx') || file.path.endsWith('.ts') ? 'typescript'
+            : file.path.endsWith('.css') ? 'css'
+            : file.path.endsWith('.json') ? 'json'
+            : file.path.endsWith('.md') ? 'markdown'
+            : file.path.endsWith('.html') ? 'html' : 'text');
+          files.push({
+            path: file.path,
+            content: file.content,
+            language,
+            lines: newLines,
+          });
+        }
+        return { ok: true, action: 'writeFiles', files };
+      }
       case 'editFile': {
         const f = currentFS[args.path];
         if (!f) return { ok: false, error: `File not found: ${args.path}` };
@@ -3344,7 +3393,15 @@ ${finalCode}
     toolCalls.forEach((tc, i) => {
       const r = results[i]?.result;
       if (!r?.ok) return;
-      if (tc.name === 'writeFile') {
+      if (tc.name === 'writeFiles') {
+        for (const file of r.files || []) {
+          const before = currentFS[file.path] ? { ...currentFS[file.path] } : null;
+          const after = { name: file.path.split('/').pop(), language: file.language, content: file.content };
+          newFS[file.path] = after;
+          changed = true;
+          changeItems.push({ path: file.path, action: before ? 'edit' : 'create', before, after });
+        }
+      } else if (tc.name === 'writeFile') {
         // Use r.content (validated inside executeToolCall) rather than
         // tc.arguments.content directly — prevents empty files when the
         // model hits max_tokens and the OpenAI arguments JSON is truncated.
@@ -3842,10 +3899,6 @@ ${finalCode}
       let backendVerificationSatisfied = !!resumeState?.backendVerificationSatisfied;
       let buildVerified = !!resumeState?.buildVerified;
       let typecheckVerified = !!resumeState?.typecheckVerified;
-      let scaffoldEstimatedFiles = Number(resumeState?.scaffoldEstimatedFiles || 0);
-      let scaffoldBatchFilesBuilt = Number(resumeState?.scaffoldBatchFilesBuilt || 0);
-      let scaffoldTotalFilesBuilt = Number(resumeState?.scaffoldTotalFilesBuilt || 0);
-      const SCAFFOLD_BATCH_SIZE = 5; // Minimum files per batch before checkpoint
       let planMajorSteps = Array.isArray(resumeState?.planMajorSteps)
         ? resumeState.planMajorSteps.filter((s) => typeof s === 'string' && s.trim())
         : [];
@@ -4276,7 +4329,7 @@ ${finalCode}
             const assistantMsg = {
               id: msgId,
               role: 'assistant',
-              content: `${data.content || ''}${recap ? `\n\n---\n\n${recap}` : ''}`,
+              content: `${data.content || ''}${data.truncated ? '\n\n⚠️ DeepSeek reached its output token limit; this response may be incomplete.' : ''}${recap ? `\n\n---\n\n${recap}` : ''}`,
               agent: activeAgent,
               agentName: AGENT_REGISTRY[activeAgent]?.name || 'Agent',
               toolCalls: compactToolCalls(allToolCalls, 12),
@@ -4284,7 +4337,7 @@ ${finalCode}
               mode: chatMode,
               timestamp: Date.now(),
               usage: data.usage,          // surface cache-hit telemetry
-              truncated: data._truncated, // set by the API on context-length fallback
+              truncated: data._truncated || data.truncated, // context or output limit reached
               telemetry: {
                 durationMs: Date.now() - executionStartedAt,
                 rounds: round + 1,
@@ -4316,6 +4369,9 @@ ${finalCode}
 
           // Model wants to call tools
           if (data.type === 'tool_calls' && data.tool_calls?.length) {
+            if (data.truncated) {
+              allSteps.push('⚠️ DeepSeek hit the output limit during this tool-call batch; completed tool calls are being applied, then the agent can continue from their results.');
+            }
             setAgentRunState(AGENT_RUN_STATES.TOOL_EXECUTION);
             stateTransitions.push({ state: AGENT_RUN_STATES.TOOL_EXECUTION, at: Date.now() });
             consecToolRounds++;
@@ -4334,7 +4390,7 @@ ${finalCode}
 
             // Execute each tool call locally (sequential so lastToolCallSig stays accurate)
             toolResults = [];
-            const isWriteTool = (name) => name === 'writeFile' || name === 'editFile' || name === 'patchLines' || name === 'deleteFile' || name === 'searchAndReplace' || name === 'autoFix' || name === 'createComponent';
+            const isWriteTool = (name) => name === 'writeFile' || name === 'writeFiles' || name === 'editFile' || name === 'patchLines' || name === 'deleteFile' || name === 'searchAndReplace' || name === 'autoFix' || name === 'createComponent';
             const isVerificationCommandTool = (name) => name === 'runBuild' || name === 'runTypecheck' || name === 'runLint' || name === 'runTests';
             const isReadTool = (name) => name === 'readFile' || name === 'analyzeFile' || name === 'searchCode' || name === 'getProjectStructure' || name === 'listFiles';
             const enforceDeepSeekWriteAfterRead = false;
@@ -4344,10 +4400,13 @@ ${finalCode}
             let changedPathsInRound = [];
             let roundDeleteAttempts = 0;
             const existingFilesAtRoundStart = new Set(Object.keys(currentFS));
+            let toolExecutionFS = currentFS;
 
             const proposedWritePaths = data.tool_calls
               .filter((tc) => isWriteTool(tc.name))
-              .map((tc) => toolCallPath(tc))
+              .flatMap((tc) => tc.name === 'writeFiles'
+                ? (Array.isArray(tc.arguments?.files) ? tc.arguments.files.map((file) => file?.path) : [])
+                : [toolCallPath(tc)])
               .filter((p) => typeof p === 'string' && p.length > 0);
 
             for (const tc of data.tool_calls) {
@@ -4370,7 +4429,9 @@ ${finalCode}
               const blockedForReadLoop = false;
               const readOutOfScope = false;
               const isOutOfScope = false;
-              const result = isOutOfScope
+              const result = tc.argumentsError
+                ? { ok: false, error: tc.argumentsError }
+                : isOutOfScope
                 ? {
                     ok: false,
                     blocked: true,
@@ -4422,7 +4483,16 @@ ${finalCode}
                       ? 'Blocked read: file write required before more reads'
                       : 'Blocked read: consecutive reads in one round are not allowed',
                   }
-                : await executeToolCall(tc.name, tc.arguments, currentFS);
+                : await executeToolCall(tc.name, tc.arguments, toolExecutionFS);
+
+              if (result?.ok && isWriteTool(tc.name)) {
+                const staged = applyToolMutations(
+                  [tc],
+                  [{ id: tc.id, name: tc.name, result }],
+                  toolExecutionFS,
+                );
+                toolExecutionFS = staged.newFS;
+              }
 
               if (!isOutOfScope && !!activeWorkFile && isReadTool(tc.name) && !!tcPath && tcPath !== activeWorkFile && !supportReadFiles.includes(tcPath)) {
                 supportReadFiles.push(tcPath);
@@ -4444,13 +4514,14 @@ ${finalCode}
               // Use result.lines — computed from the validated/safe content inside
               // executeToolCall — so it can never show 0 from a raw undefined arg.
               const argSummary = tc.name === 'writeFile' ? `"${tc.arguments.path}" (${result.lines ?? 0} lines)`
+                : tc.name === 'writeFiles' ? `${result.files?.length ?? tc.arguments.files?.length ?? 0} file(s)`
                 : tc.name === 'editFile' ? `"${tc.arguments.path}"`
                 : tc.name === 'deleteFile' ? `"${tc.arguments.path}"`
                 : tc.name === 'readFile' ? `"${tc.arguments.path}"`
                 : tc.name === 'searchCode' ? `"${tc.arguments.pattern}"`
                 : tc.name === 'analyzeFile' ? `"${tc.arguments.path || activeFile}"`
                 : '';
-              const icon = tc.name === 'writeFile' ? '📝' : tc.name === 'editFile' ? '✏️' : tc.name === 'deleteFile' ? '🗑️' : tc.name === 'readFile' ? '📖' : tc.name === 'searchCode' ? '🔍' : tc.name === 'analyzeFile' ? '🔬' : tc.name === 'runCommand' ? '💻' : '📋';
+              const icon = tc.name === 'writeFile' || tc.name === 'writeFiles' ? '📝' : tc.name === 'editFile' ? '✏️' : tc.name === 'deleteFile' ? '🗑️' : tc.name === 'readFile' ? '📖' : tc.name === 'searchCode' ? '🔍' : tc.name === 'analyzeFile' ? '🔬' : tc.name === 'runCommand' ? '💻' : '📋';
               const resultSummary = isConsecutiveDuplicate
                 ? '⚠️ duplicate blocked'
                 : activeFileReadBlocked
@@ -4494,7 +4565,7 @@ ${finalCode}
                 ...history,
                 {
                   role: 'user',
-                  content: 'Progress gate: too many tool calls without concrete edits. Stop command retries and read loops. Perform file writes now (editFile/writeFile/patchLines), then verify.',
+                  content: 'Progress gate: too many tool calls without concrete edits. Stop command retries and read loops. Write a cohesive file tree with writeFiles when appropriate, otherwise use editFile/writeFile/patchLines, then verify.',
                 },
               ].slice(-historySliceLimit);
               allSteps.push(`⚠️ Progress gate triggered: ${allToolCalls.length} calls with ${totalWriteSuccesses} file write(s). Forcing write-first behavior.`);
@@ -4502,39 +4573,27 @@ ${finalCode}
 
             // Apply filesystem mutations
             const { newFS, changed, cmdsToRun, changeItems } = applyToolMutations(data.tool_calls, toolResults, currentFS);
-            
-            // Track scaffold mode batch progress
-            if (scaffoldMode && changed) {
-              const newFilesInRound = changeItems.filter(item => item.action === 'create').length;
-              scaffoldBatchFilesBuilt += newFilesInRound;
-              scaffoldTotalFilesBuilt += newFilesInRound;
-              
-              // Check if we hit batch size threshold
-              if (scaffoldBatchFilesBuilt >= SCAFFOLD_BATCH_SIZE) {
-                const progressPercent = scaffoldEstimatedFiles > 0 
-                  ? Math.round((scaffoldTotalFilesBuilt / scaffoldEstimatedFiles) * 100)
-                  : 0;
-                
-                allSteps.push(`📦 Scaffold batch complete: ${scaffoldBatchFilesBuilt} files built (${scaffoldTotalFilesBuilt}/${scaffoldEstimatedFiles || '?'} total, ${progressPercent}% done)`);
-                
-                // Auto-continue if less than 50% complete, checkpoint if >50%
-                if (scaffoldEstimatedFiles > 0 && progressPercent >= 50) {
-                  // Checkpoint: let agent summarize and ask user
-                  scaffoldBatchFilesBuilt = 0; // Reset batch counter
-                  allSteps.push(`✅ Scaffold checkpoint: >50% complete. Summarizing and prompting user for next batch.`);
-                } else if (scaffoldEstimatedFiles > 0) {
-                  // Auto-continue: still <50% complete
-                  scaffoldBatchFilesBuilt = 0; // Reset batch counter
-                  history = [
-                    ...history,
-                    {
-                      role: 'user',
-                      content: `Scaffold batch ${Math.ceil(scaffoldTotalFilesBuilt / SCAFFOLD_BATCH_SIZE)} complete (${scaffoldTotalFilesBuilt}/${scaffoldEstimatedFiles} files, ${progressPercent}% done). Auto-continuing to next batch. Build the next ${SCAFFOLD_BATCH_SIZE}+ files without stopping.`,
-                    },
-                  ].slice(-historySliceLimit);
-                  allSteps.push(`🔄 Auto-continuing scaffold: ${progressPercent}% done, building next batch...`);
-                  // Don't break the loop - let agent continue
-                }
+            for (let i = 0; i < toolResults.length; i++) {
+              const result = toolResults[i]?.result;
+              if (!result?.ok) continue;
+              if (data.tool_calls[i]?.name === 'writeFile') {
+                toolResults[i].result = {
+                  ok: true,
+                  action: 'write',
+                  path: result.path,
+                  language: result.language,
+                  lines: result.lines,
+                };
+              } else if (data.tool_calls[i]?.name === 'writeFiles') {
+                toolResults[i].result = {
+                  ok: true,
+                  action: 'writeFiles',
+                  files: (result.files || []).map((file) => ({
+                    path: file.path,
+                    language: file.language,
+                    lines: file.lines,
+                  })),
+                };
               }
             }
             
@@ -4554,9 +4613,14 @@ ${finalCode}
               changedPathsInRound = Array.from(new Set(changeItems.map((c) => c.path)));
               replaceAll(newFS);
               data.tool_calls.forEach(tc => {
-                if (tc.name === 'writeFile') {
-                  setOpenTabs(prev => prev.includes(tc.arguments.path) ? prev : [...prev, tc.arguments.path]);
-                  setActiveFile(tc.arguments.path);
+                const writtenPaths = tc.name === 'writeFile'
+                  ? [tc.arguments.path]
+                  : tc.name === 'writeFiles'
+                    ? (Array.isArray(tc.arguments.files) ? tc.arguments.files.map((file) => file.path) : [])
+                    : [];
+                for (const path of writtenPaths) {
+                  setOpenTabs(prev => prev.includes(path) ? prev : [...prev, path]);
+                  setActiveFile(path);
                 }
               });
 
@@ -4686,7 +4750,7 @@ ${finalCode}
                 ].slice(-historySliceLimit);
               }
 
-              if (verificationCommandsRequested && commandStatuses.every((s) => s.ok)) {
+              if (!data.truncated && verificationCommandsRequested && commandStatuses.every((s) => s.ok)) {
                 const requestedBuild = data.tool_calls.some((tc) => tc.name === 'runBuild');
                 const requestedTypecheck = data.tool_calls.some((tc) => tc.name === 'runTypecheck');
                 if (requestedBuild) buildVerified = true;
@@ -4695,7 +4759,31 @@ ${finalCode}
                   backendVerificationSatisfied = true;
                 }
                 pendingBatchVerification = false;
-                allSteps.push('✅ Requested verification command(s) succeeded; returning results to the agent to finish any remaining requested work.');
+                const msgId = makeMessageId('assistant');
+                const summary = summarizeFileChanges(allFileChanges);
+                const recap = buildExecutionRecap(allToolCalls, summary);
+                if (summary.files.length > 0) {
+                  changeLedgerRef.current.set(msgId, Array.from(allFileChanges.values()));
+                }
+                const assistantMsg = {
+                  id: msgId,
+                  role: 'assistant',
+                  content: `✅ Build and verification completed successfully.${summary.files.length > 0 ? ` Implemented ${summary.files.length} file(s).` : ''}${recap ? `\n\n---\n\n${recap}` : ''}`,
+                  agent: activeAgent,
+                  agentName: AGENT_REGISTRY[activeAgent]?.name || 'Agent',
+                  toolCalls: compactToolCalls(allToolCalls, 12),
+                  steps: allSteps,
+                  mode: chatMode,
+                  timestamp: Date.now(),
+                  changedFiles: summary.files,
+                  changedPlus: summary.totalPlus,
+                  changedMinus: summary.totalMinus,
+                };
+                setMessages(prev => [...prev.filter(m => !m._progress), assistantMsg]);
+                setConversations(prev => prev.map(c => c.id === activeConvoId
+                  ? { ...c, messages: [...c.messages.filter(m => !m._progress), assistantMsg] }
+                  : c));
+                return;
               }
             }
 
@@ -4750,7 +4838,7 @@ ${finalCode}
           const assistantMsg = {
             id: msgId,
             role: 'assistant',
-            content: `${data.content || 'Done.'}${recap ? `\n\n---\n\n${recap}` : ''}`,
+            content: `${data.content || 'Done.'}${data.truncated ? '\n\n⚠️ DeepSeek reached its output token limit; this response may be incomplete.' : ''}${recap ? `\n\n---\n\n${recap}` : ''}`,
             agent: activeAgent, agentName: AGENT_REGISTRY[activeAgent]?.name || 'Agent',
             toolCalls: compactToolCalls(allToolCalls, 12), steps: allSteps, mode: chatMode, timestamp: Date.now(),
             changedFiles: summary.files,
