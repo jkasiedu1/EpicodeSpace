@@ -145,8 +145,27 @@ function explicitlyRequestsVerification(messages: any[]) {
     : Array.isArray(content)
       ? content.map((part) => typeof part?.text === 'string' ? part.text : '').join('\n')
       : '';
-  return /\b(run|execute|check|verify|test|build|typecheck|lint)\b.{0,60}\b(build|tests?|typecheck|lint|verification)\b|\b(runBuild|runTests|runLint|runTypecheck)\b/i.test(text);
+  const affirmativeText = text
+    .replace(/\b(?:do not|don't|dont|never|avoid|skip|without|no need to)\b[^.!?\n]*/gi, '')
+    .replace(/\bhow\s+(?:to|do i|can i|should i)\s+(?:run|execute)\b[^.!?\n]*/gi, '');
+  return /\b(?:run|execute)\s+(?:(?:the|all)\s+)?(?:build|tests?|typecheck|lint|checks?)\b|\b(?:build|test|typecheck|lint)\s+(?:the\s+)?(?:project|changes|code|suite)\b|\b(?:verify|check)\s+(?:the\s+)?(?:changes|fix|code|build|tests?|typecheck|lint|project)\b|\bverify\b|\b(?:runBuild|runTests|runLint|runTypecheck)\b/i.test(affirmativeText);
 }
+
+function isRepairRequest(messages: any[]) {
+  const lastUserMessage = [...(Array.isArray(messages) ? messages : [])]
+    .reverse()
+    .find((message) => message?.role === 'user');
+  const content = lastUserMessage?.content;
+  const text = typeof content === 'string'
+    ? content
+    : Array.isArray(content)
+      ? content.map((part) => typeof part?.text === 'string' ? part.text : '').join('\n')
+      : '';
+  return /\b(fix|debug|repair|bug|broken|crash|error|failing|failed|failure|exception|doesn't work|does not work|not working)\b/i.test(text);
+}
+
+const REPAIR_TOOL_NAMES = new Set(['readFile', 'writeFile', 'writeFiles', 'patchLines', 'editFile']);
+const VERIFICATION_TOOL_NAMES = new Set(['runBuild', 'runTests', 'runLint', 'runTypecheck']);
 
 const PROVIDER_TIMEOUT_MS = Math.max(5000, Number(process.env['AGENT_PROVIDER_TIMEOUT_MS'] ?? '45000'));
 const PROVIDER_MAX_RETRIES = Math.max(0, Number(process.env['AGENT_PROVIDER_RETRIES'] ?? '1'));
@@ -841,11 +860,15 @@ router.post('/chat', async (req, res) => {
     const contextStr = buildContextMessage(context);
     const modeInstr = MODE_INSTRUCTIONS[safeMode] || MODE_INSTRUCTIONS.ask;
     const verificationRequested = explicitlyRequestsVerification(messages);
+    const repairRequest = safeMode === 'agent' && isRepairRequest(messages);
     const providerTools = getToolsForMode(safeMode).filter((tool) =>
-      verificationRequested || !['runBuild', 'runTests', 'runLint', 'runTypecheck'].includes(tool.name)
+      (!repairRequest || REPAIR_TOOL_NAMES.has(tool.name) || (verificationRequested && VERIFICATION_TOOL_NAMES.has(tool.name)))
+      && (verificationRequested || !VERIFICATION_TOOL_NAMES.has(tool.name))
     );
     const persona = AGENT_PERSONAS[activeAgent] || AGENT_PERSONAS[resolvedModel] || AGENT_PERSONAS['epicode-agent'];
+    const availableToolNames = new Set(providerTools.map((tool) => tool.name));
     const policyPreview = Object.entries(TOOL_POLICY)
+      .filter(([tool]) => availableToolNames.has(tool))
       .map(([tool, tier]) => `${tool}:${tier}`)
       .join(', ');
     const scaffoldMode = safeMode === 'scaffold';

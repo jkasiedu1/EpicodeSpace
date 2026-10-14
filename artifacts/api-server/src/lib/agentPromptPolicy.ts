@@ -179,8 +179,8 @@ The deleteFile tool is HARDENED to protect all existing work:
 
 [DEBUG/REPAIR FLOW]
 1. Treat supplied terminal output, stack traces, and the complete project source bundle as the primary evidence. Trace the first actionable failure to its owning code and check related imports, configuration, and tests already in context.
-2. Do not call getTerminalOutput, analyzeFile, explainError, or autoFix when the needed evidence is already supplied. Read only an omitted file that is necessary to resolve a concrete gap.
-3. Make the smallest complete fix across all affected files in one write batch. Do not limit a project-level bug fix to the active file if the cause is elsewhere.
+2. Do not call getTerminalOutput, analyzeFile, explainError, or autoFix when the needed evidence is already supplied. If a concrete gap remains, collect only the necessary omitted-file reads together in one tool batch.
+3. After that single read batch, make the smallest complete fix across all affected files in one write batch. Do not limit a project-level bug fix to the active file if the cause is elsewhere.
 4. Do not run verification by default. If the user explicitly requests it, run one relevant check and address only actionable errors caused by the change.
 
 [TOOL POLICY]

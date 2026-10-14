@@ -3894,7 +3894,10 @@ ${finalCode}
       let stagnationRounds = Number(resumeState?.stagnationRounds || 0);
       let verificationFailures = 0;
       const executionStartedAt = Date.now();
-      const userRequestedVerification = /\b(run|execute|check|verify|test|build|typecheck|lint)\b.{0,60}\b(build|tests?|typecheck|lint|verification)\b|\b(runBuild|runTests|runLint|runTypecheck)\b/i.test(userMessage);
+      const affirmativeVerificationRequest = userMessage
+        .replace(/\b(?:do not|don't|dont|never|avoid|skip|without|no need to)\b[^.!?\n]*/gi, '')
+        .replace(/\bhow\s+(?:to|do i|can i|should i)\s+(?:run|execute)\b[^.!?\n]*/gi, '');
+      const userRequestedVerification = /\b(?:run|execute)\s+(?:(?:the|all)\s+)?(?:build|tests?|typecheck|lint|checks?)\b|\b(?:build|test|typecheck|lint)\s+(?:the\s+)?(?:project|changes|code|suite)\b|\b(?:verify|check)\s+(?:the\s+)?(?:changes|fix|code|build|tests?|typecheck|lint|project)\b|\bverify\b|\b(?:runBuild|runTests|runLint|runTypecheck)\b/i.test(affirmativeVerificationRequest);
       const stateTransitions = [{ state: AGENT_RUN_STATES.PLANNING, at: executionStartedAt }];
       const MAX_ROUNDS_DEFAULT = 16;
       const MAX_ROUNDS_DEEPSEEK = 24;
@@ -4297,44 +4300,44 @@ ${finalCode}
               && /<\/?(read|write|edit|run|command|file|patch)>/i.test(data.content);
             const shouldForceToolRetry =
               chatMode === 'agent' &&
-              round < 3 &&
+              round === 0 &&
               allToolCalls.length === 0 &&
               (looksLikeWorkspaceChangeRequest(userMessage) || pseudoToolText);
 
             if (shouldForceToolRetry) {
               if (pseudoToolText) {
-                allSteps.push(`⚠️ Detected pseudo-tool narration (fake <read>/<write> tags) with no real tool calls; forcing retry ${round + 1}/3.`);
+                allSteps.push('⚠️ Detected pseudo-tool narration without real tool calls; forcing one retry.');
                 history = [
                   ...history,
                   {
                     role: 'user',
-                    content: 'Do NOT write fake tool descriptions like <readFile> or <invoke> tags. Use real tools only: readFile, editFile, writeFile, runCommand, etc. Execute real tools now or explain what you need.',
+                    content: 'Do not narrate tools. The complete project source and diagnostics are already in context. Make the focused fix now in one writeFiles call (or one patchLines call for a single-file change). Read only a necessary file omitted from context; do not run diagnostics or verification unless explicitly requested.',
                   },
                 ].slice(-historySliceLimit);
               } else {
-                allSteps.push('⚠️ Plain-text reply in agent mode; retrying with forced tool-use reminder.');
+                allSteps.push('⚠️ Plain-text reply in agent mode; forcing one implementation retry.');
                 history = [
                   ...history,
                   {
                     role: 'user',
-                    content: 'System reminder: The user asked for a workspace change. Do not answer with prose only. Use workspace tools now: first inspect with readFile/listFiles/searchCode as needed, then apply edits with editFile/writeFile.',
+                    content: 'The user requested a code change. Use the complete source bundle already provided and make the focused fix now in one writeFiles call (or one patchLines call for a single-file change). Read only a necessary file omitted from context; do not call diagnostic or verification tools unless explicitly requested.',
                   },
                 ].slice(-historySliceLimit);
               }
               continue;
             }
 
-            if (pseudoToolText && round >= 3) {
+            if (pseudoToolText && round >= 1) {
               const msgId = makeMessageId('assistant');
               const summary = summarizeFileChanges(allFileChanges);
               const assistantMsg = {
                 id: msgId,
                 role: 'assistant',
-                content: 'Agent failed: repeated fake tool narration instead of real tool execution. This run is blocked to prevent loops. Submit your request again and the agent will enforce real tool calls only.',
+                content: 'Agent failed to issue a real file-edit tool call after one retry. No changes were applied; try again with the affected file or exact error if more context is needed.',
                 agent: activeAgent,
                 agentName: AGENT_REGISTRY[activeAgent]?.name || 'Agent',
                 toolCalls: compactToolCalls(allToolCalls, 12),
-                steps: [...allSteps, '🚫 Fake tool narration guard: 3 attempts blocked; execution aborted.'],
+                steps: [...allSteps, '🚫 Fake tool narration guard: one retry was used; execution aborted.'],
                 mode: chatMode,
                 timestamp: Date.now(),
                 changedFiles: summary.files,
