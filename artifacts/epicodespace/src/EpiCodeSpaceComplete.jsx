@@ -964,12 +964,23 @@ function looksLikeCommandExecutionRequest(text) {
   return /\b(run|execute|launch|start)\b.*\b(command|terminal|runtime|build|typecheck|lint|tests?|dev|server)\b/.test(value);
 }
 
-function buildReasonerNeedles(userMessage, activeFile, pinnedFilePath) {
+function buildReasonerNeedles(userMessage, activeFile, pinnedFilePath, diagnosticText = '') {
+  const genericWords = new Set([
+    'fix', 'debug', 'error', 'errors', 'bug', 'bugs', 'broken', 'crash', 'fail', 'failed',
+    'failing', 'issue', 'issues', 'problem', 'problems', 'please', 'help', 'working', 'works',
+    'doesnt', 'doesn', 'cannot', 'should', 'would', 'could', 'this', 'that', 'with', 'from',
+    'when', 'what', 'where', 'which', 'while', 'into', 'after', 'before', 'there', 'their',
+    'have', 'been', 'also', 'just', 'only', 'make', 'sure', 'need', 'want', 'app', 'project',
+    'code', 'file', 'files', 'the', 'and', 'for', 'not'
+  ]);
   const needles = new Set(
-    String(userMessage || '')
+    `${String(userMessage || '')}\n${String(diagnosticText || '').split('\n')
+      .filter((line) => /(error|exception|failed|failure|cannot|undefined|null|TS\d+:|\bat\s+.*:\d+:\d+)/i.test(line))
+      .slice(0, 30)
+      .join('\n')}`
       .toLowerCase()
       .split(/\W+/)
-      .filter((word) => word.length >= 4)
+      .filter((word) => word.length >= 4 && !genericWords.has(word))
   );
 
   for (const path of [activeFile, pinnedFilePath]) {
@@ -984,8 +995,13 @@ function buildReasonerNeedles(userMessage, activeFile, pinnedFilePath) {
 
 const PROJECT_CONTEXT_CONTENT_BUDGET = 80000;
 
-function buildProjectContextBundle(fs, activeFile, userMessage, pinnedFilePath, budget = PROJECT_CONTEXT_CONTENT_BUDGET) {
-  const needles = buildReasonerNeedles(userMessage, activeFile, pinnedFilePath);
+function buildProjectContextBundle(fs, activeFile, userMessage, pinnedFilePath, diagnosticText = '', budget = PROJECT_CONTEXT_CONTENT_BUDGET) {
+  const needles = buildReasonerNeedles(userMessage, activeFile, pinnedFilePath, diagnosticText);
+  const referencedPaths = new Set();
+  const pathPattern = /(?:^|[\s("'`])((?:\/?[A-Za-z0-9_.@-]+\/)+[A-Za-z0-9_.@-]+\.[A-Za-z0-9]{1,10})/gm;
+  for (const match of `${String(userMessage || '')}\n${String(diagnosticText || '')}`.matchAll(pathPattern)) {
+    referencedPaths.add(match[1].replace(/\\/g, '/').toLowerCase());
+  }
   const candidates = [];
   const omitted = [];
   const excludedPath = /(^|\/)(node_modules|\.git|dist|build|coverage|\.next|\.vite|vendor)(\/|$)/i;
@@ -1012,6 +1028,14 @@ function buildProjectContextBundle(fs, activeFile, userMessage, pinnedFilePath, 
 
     if (path === activeFile) score += 100;
     if (path === pinnedFilePath) score += 80;
+    const normalizedPath = path.toLowerCase();
+    if (Array.from(referencedPaths).some((referencedPath) =>
+      normalizedPath === referencedPath
+      || normalizedPath.endsWith(`/${referencedPath}`)
+      || referencedPath.endsWith(`/${normalizedPath}`)
+    )) {
+      score += 1000;
+    }
     if (/package\.json$|tsconfig|vite\.config|tailwind\.config|openapi\.ya?ml|schema\//i.test(path)) score += 10;
     if (/(^|\/)(src|app|pages|components|server|api|lib)(\/|$)/i.test(path)) score += 5;
     if (/(^|\/)(__tests__|tests?|e2e)(\/|$)|\.(test|spec)\.[^.]+$/i.test(path)) score += 3;
@@ -3681,8 +3705,8 @@ ${finalCode}
 
   // ── Slash command expansion ────────────────────────────────────────────
   const SLASH_COMMANDS = {
-    '/fix':     `Fix all bugs and errors in the active file. Call getTerminalOutput first to check for runtime errors, then analyzeFile, then autoFix to apply automatic patches, then address any remaining issues with editFile.`,
-    '/debug':   `Debug the active file. Call getTerminalOutput to see recent terminal output/errors, then analyzeFile, then fix every issue found.`,
+    '/fix':     `Fix the reported problem in the project. Use the supplied project source bundle and any terminal error output already in context; trace the root cause through the relevant code and related imports/configuration. Read only an omitted file if it is necessary, then apply the complete focused fix. Do not run routine analysis, auto-fix, or verification tools.`,
+    '/debug':   `Debug and fix the reported problem in the project. Start with the supplied source bundle and terminal output already in context, trace the root cause through relevant files, and apply a focused complete fix. Read only necessary omitted files; do not repeat diagnostics already present.`,
     '/explain': `Explain the active file thoroughly: what it does, how it's structured, what each major section does, and any notable patterns or potential improvements.`,
     '/test':    `Write comprehensive unit tests for the active file. Use the project's existing test framework (check package.json). Create the test file alongside the source file.`,
     '/doc':     `Add JSDoc/TSDoc comments to all exported functions and components in the active file. Do not change any logic — only add documentation.`,
@@ -3744,12 +3768,16 @@ ${finalCode}
     setIsTyping(true);
     setAgentRunState(AGENT_RUN_STATES.PLANNING);
 
+    const isFixDebugRequest = /\b(fix|debug|error|bug|broken|crash|not work|fail|exception|undefined|cannot|issue|problem)\b/i.test(userMessage);
+    const recentOutput = isFixDebugRequest && terminalOutputRef.current.length > 0
+      ? terminalOutputRef.current.slice(-100).join('\n')
+      : '';
     const context = {
       activeFile,
       activeContent: fileSystem[activeFile]?.content || '',
       projectFilesBundle: chatMode === 'ask'
         ? null
-        : buildProjectContextBundle(fileSystem, activeFile, userMessage, pinnedFilePath),
+        : buildProjectContextBundle(fileSystem, activeFile, userMessage, pinnedFilePath, recentOutput),
       // Guard against entries with missing/non-string content (directory
       // placeholders, freshly-created empty files, binary blobs). Without
       // this, .split('\n') throws "undefined is not an object".
@@ -3764,10 +3792,8 @@ ${finalCode}
     const bundledContextPaths = new Set(
       (context.projectFilesBundle?.files || []).map((file) => file.path),
     );
-    // Auto-inject terminal output when the user asks to fix/debug something
-    const isFixDebugRequest = /\b(fix|debug|error|bug|broken|crash|not work|fail|exception|undefined|cannot|issue)\b/i.test(userMessage);
-    if (isFixDebugRequest && terminalOutputRef.current.length > 0) {
-      const recentOutput = terminalOutputRef.current.slice(-40).join('\n');
+    // Reuse available diagnostics so the model need not fetch the same output again.
+    if (recentOutput) {
       context.terminalOutput = recentOutput;
     }
 
